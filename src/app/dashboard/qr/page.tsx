@@ -1,45 +1,42 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
-import { Copy, Check, ExternalLink, Share2, Trash2 } from "lucide-react";
+import { AlertTriangle, Copy, Check, Download, ExternalLink, Share2, Trash2 } from "lucide-react";
 import { Bar, PageHead, Panel, PanelHead, Tag } from "@/components/dashboard/ui";
 import {
-  createSession,
-  deleteSession,
   formatRemaining,
-  hoursLeft,
-  useSessions,
-  type CustomerSession,
+  issueSession,
+  revokeSession,
+  useDealerSessions,
+  type IssuedSession,
 } from "@/lib/store";
+import { SESSION_LABEL } from "@/lib/session-types";
 import { cn } from "@/lib/utils";
 
 /**
- * Issue a customer link.
+ * Issue a customer link (§5).
  *
- * One code, one customer, one short window. Short expiry is a feature: it keeps
- * the link tied to a conversation that actually happened at the counter, and it
- * stops old codes circulating on WhatsApp months later against prices and stock
- * that have moved.
- *
- * The code created here is the same record the customer's phone opens and the
- * same record their finished design comes back on — see `lib/store.ts`.
+ * The QR is generated on the server against NEXT_PUBLIC_APP_URL and is a real,
+ * scannable symbol — not a decorative block. If that origin is not publicly
+ * reachable the screen says so loudly, because the failure mode otherwise is a
+ * dealer printing a code that dies the moment a customer scans it on mobile
+ * data.
  */
 export default function QrPage() {
-  const { sessions, ready } = useSessions();
+  const { sessions, ready, origin, publicReachable, refresh } = useDealerSessions();
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [hours, setHours] = useState(72);
-  const [issued, setIssued] = useState<CustomerSession | null>(null);
+  const [issued, setIssued] = useState<IssuedSession | null>(null);
+  const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-
-  const origin = typeof window !== "undefined" ? window.location.origin : "https://rachna.ai";
-  const url = issued ? `${origin}/c/${issued.code}` : "";
+  const [error, setError] = useState<string | null>(null);
 
   const copy = async () => {
-    if (!url) return;
+    if (!issued) return;
     try {
-      await navigator.clipboard.writeText(url);
+      await navigator.clipboard.writeText(issued.url);
       setCopied(true);
       setTimeout(() => setCopied(false), 1600);
     } catch {
@@ -47,14 +44,29 @@ export default function QrPage() {
     }
   };
 
-  const issue = () => {
-    const s = createSession({ customerName: name, phone, validityHours: hours });
-    setIssued(s);
-    setName("");
-    setPhone("");
+  const issue = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await issueSession({ customerName: name, phone, validityHours: hours });
+      setIssued(r);
+      setName("");
+      setPhone("");
+      refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const live = sessions.filter((s) => s.status !== "expired").length;
+  const revoke = async (token: string) => {
+    await revokeSession(token);
+    if (issued?.session.token === token) setIssued(null);
+    refresh();
+  };
+
+  const live = sessions.filter((s) => !s.expired).length;
 
   return (
     <>
@@ -64,22 +76,44 @@ export default function QrPage() {
         lede="The customer scans, answers a few questions, photographs the room, sees it rebuilt in 3D and picks a combination you can actually supply. The finished scheme lands in your Customers tab."
       />
 
+      {!publicReachable && ready && (
+        <div className="mb-4 flex gap-3 rounded-2xl border border-[color-mix(in_oklab,var(--color-brass)_45%,transparent)] bg-[color-mix(in_oklab,var(--color-brass)_9%,transparent)] p-4">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[#e0bd72]" strokeWidth={1.8} />
+          <div className="text-[0.8125rem] leading-relaxed text-paper-200">
+            <p className="text-paper-50">This QR will only work on this machine.</p>
+            <p className="mt-1">
+              Codes are being generated against{" "}
+              <span className="data text-paper-100">{origin}</span>, which a customer&rsquo;s phone
+              cannot reach. Start a tunnel and set{" "}
+              <span className="data text-paper-100">NEXT_PUBLIC_APP_URL</span> in{" "}
+              <span className="data text-paper-100">.env.local</span> before handing a code to
+              anyone.
+            </p>
+            <p className="data mt-2 text-[0.6875rem] text-paper-400">npm run tunnel</p>
+          </div>
+        </div>
+      )}
+
       <div className="grid gap-4 xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
         <Panel>
           <PanelHead title="Issue a new link" />
 
           {issued ? (
             <div className="flex flex-col items-center gap-5">
-              <div className="relative rounded-2xl border border-[color-mix(in_oklab,var(--color-paper-200)_14%,transparent)] bg-ink-900 p-5">
-                <QrPreview code={issued.code} />
-                <span className="absolute inset-x-5 top-5 h-px animate-[qrsweep_2.8s_cubic-bezier(0.83,0,0.17,1)_infinite] bg-pigment" />
+              <div className="overflow-hidden rounded-2xl border border-[color-mix(in_oklab,var(--color-paper-200)_14%,transparent)] bg-paper-50 p-3">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={issued.qr} alt={`QR code for ${issued.url}`} className="h-52 w-52" />
               </div>
 
               <div className="text-center">
-                <p className="data text-[1.5rem] tracking-[0.3em] text-paper-50">{issued.code}</p>
-                <p className="mt-1.5 text-[0.8125rem] text-paper-200">{issued.customerName}</p>
-                <p className="data mt-1 text-[0.625rem] tracking-[0.08em] text-paper-400">
-                  valid {issued.validityHours} h · {formatRemaining(issued)} left
+                <p className="data text-[1.35rem] tracking-[0.24em] text-paper-50">
+                  {issued.session.token}
+                </p>
+                <p className="mt-1.5 text-[0.8125rem] text-paper-200">
+                  {issued.session.customerName}
+                </p>
+                <p className="data mt-1 break-all text-[0.625rem] tracking-[0.04em] text-paper-400">
+                  {issued.url}
                 </p>
               </div>
 
@@ -91,8 +125,15 @@ export default function QrPage() {
                   {copied ? <Check className="h-4 w-4" strokeWidth={2} /> : <Copy className="h-4 w-4" strokeWidth={1.7} />}
                   {copied ? "Copied" : "Copy link"}
                 </button>
+                <a
+                  href={issued.qr}
+                  download={`rachna-${issued.session.token}.png`}
+                  className="flex h-10 items-center justify-center gap-2 rounded-full border border-[color-mix(in_oklab,var(--color-paper-200)_18%,transparent)] px-4 text-[0.8125rem] text-paper-100"
+                >
+                  <Download className="h-4 w-4" strokeWidth={1.7} />
+                </a>
                 <Link
-                  href={`/c/${issued.code}`}
+                  href={`/c/${issued.session.token}`}
                   target="_blank"
                   className="flex h-10 items-center justify-center gap-2 rounded-full bg-paper-50 px-4 text-[0.8125rem] font-medium text-ink-900"
                 >
@@ -152,19 +193,21 @@ export default function QrPage() {
 
               <button
                 onClick={issue}
-                className="mt-1 inline-flex h-11 items-center justify-center gap-2 rounded-full bg-paper-50 text-[0.9375rem] font-medium text-ink-900 transition-transform duration-200 hover:-translate-y-px"
+                disabled={busy}
+                className="mt-1 inline-flex h-11 items-center justify-center gap-2 rounded-full bg-paper-50 text-[0.9375rem] font-medium text-ink-900 transition-transform duration-200 hover:-translate-y-px disabled:opacity-50"
               >
-                <Share2 className="h-4 w-4" strokeWidth={1.8} /> Issue link
+                <Share2 className="h-4 w-4" strokeWidth={1.8} />
+                {busy ? "Creating…" : "Issue link"}
               </button>
 
+              {error && <p className="text-[0.8125rem] text-pigment-soft">{error}</p>}
+
               <p className="text-[0.75rem] leading-relaxed text-paper-400">
-                Each code is unique and dies on expiry. The block shown after issuing is a
-                preview — the scannable QR symbol is generated with the real token.
+                Each code is unique to one customer, belongs to this shop only, and stops
+                working when it expires.
               </p>
             </div>
           )}
-
-          <style>{`@keyframes qrsweep{0%{transform:translateY(0);opacity:0}12%{opacity:1}88%{opacity:1}100%{transform:translateY(140px);opacity:0}}`}</style>
         </Panel>
 
         <div className="flex flex-col gap-4">
@@ -175,10 +218,10 @@ export default function QrPage() {
             />
             <ol className="grid gap-3 sm:grid-cols-2">
               {[
-                ["Answer", "Type of paint, damp, budget, brand, the feeling they want."],
-                ["Photograph", "Two or three pictures of the room."],
+                ["Answer", "Paint type, damp, budget, brand — all drawn from your catalogue."],
+                ["Photograph", "Two or three pictures of the room, uploaded to your account."],
                 ["Rebuild", "The room comes back as 3D geometry they can look around."],
-                ["Compose", "Combinations built from your stock — nothing you cannot produce."],
+                ["Compose", "Combinations built from your live stock. Nothing you cannot supply."],
                 ["Send", "The scheme and their measurements land in Customers, priced."],
               ].map(([t, b], i) => (
                 <li
@@ -199,58 +242,54 @@ export default function QrPage() {
             <div className="p-5 sm:p-6">
               <PanelHead
                 title="Issued links"
-                sub={ready ? `${live} live · expiry runs against the window you set` : "Loading…"}
+                sub={ready ? `${live} live · updates as customers work` : "Loading…"}
               />
             </div>
             <div className="divide-y divide-[color-mix(in_oklab,var(--color-paper-200)_8%,transparent)]">
               {sessions.map((s) => {
-                const pct = (hoursLeft(s) / s.validityHours) * 100;
+                const total = (new Date(s.expiresAt).getTime() - new Date(s.createdAt).getTime()) / 3_600_000;
+                const pct = (s.hoursLeft / total) * 100;
                 const tone = pct < 25 ? "critical" : pct < 50 ? "low" : "healthy";
                 const tag =
-                  s.status === "submitted" || s.status === "quoted"
-                    ? "won"
-                    : s.status === "expired"
-                      ? "expired"
-                      : s.status === "in_progress"
-                        ? "used"
-                        : "active";
+                  s.status === "SUBMITTED" ? "won" : s.expired ? "expired" : s.status === "IN_PROGRESS" ? "used" : "active";
                 return (
                   <div
-                    key={s.code}
-                    className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-4 px-5 py-4 sm:grid-cols-[5rem_minmax(0,1fr)_9rem_auto_auto] sm:px-6"
+                    key={s.token}
+                    className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-4 px-5 py-4 sm:grid-cols-[7rem_minmax(0,1fr)_9rem_auto_auto] sm:px-6"
                   >
                     <Link
-                      href={`/c/${s.code}`}
+                      href={`/c/${s.token}`}
                       target="_blank"
-                      className="data text-[0.8125rem] tracking-[0.16em] text-paper-50 underline-offset-4 hover:underline"
+                      className="data truncate text-[0.75rem] tracking-[0.12em] text-paper-50 underline-offset-4 hover:underline"
                     >
-                      {s.code}
+                      {s.token}
                     </Link>
                     <div className="min-w-0">
                       <p className="truncate text-[0.875rem] text-paper-100">{s.customerName}</p>
                       <p className="data mt-0.5 text-[0.625rem] tracking-[0.08em] text-paper-400 uppercase">
-                        {s.opens} opens · step {Math.min(s.step + 1, 6)} of 6
-                        {s.status === "submitted" ? " · design received" : ""}
+                        {s.opens} opens · step {Math.min((s.project?.step ?? 0) + 1, 6)} of 6 ·{" "}
+                        {s.project?.images.length ?? 0} photos ·{" "}
+                        {s.project?.savedDesigns.length ?? 0} saved
                       </p>
                     </div>
                     <div className="col-span-3 sm:col-span-1">
                       <div className="flex items-baseline justify-between">
                         <span className="data text-[0.625rem] text-paper-400">expires</span>
                         <span className="data text-[0.6875rem] text-paper-200">
-                          {formatRemaining(s)}
+                          {formatRemaining(s.hoursLeft)}
                         </span>
                       </div>
                       <Bar pct={pct} tone={tone} className="mt-1.5" />
                     </div>
                     <button
-                      onClick={() => deleteSession(s.code)}
-                      aria-label={`Revoke ${s.code}`}
+                      onClick={() => revoke(s.token)}
+                      aria-label={`Revoke ${s.token}`}
                       className="hidden text-paper-400 transition-colors hover:text-pigment-soft sm:block"
                     >
                       <Trash2 className="h-3.5 w-3.5" strokeWidth={1.6} />
                     </button>
                     <Tag status={tag as "active" | "used" | "expired" | "won"}>
-                      {s.status === "submitted" ? "received" : s.status.replace("_", " ")}
+                      {SESSION_LABEL[s.status] ?? s.status}
                     </Tag>
                   </div>
                 );
@@ -265,34 +304,5 @@ export default function QrPage() {
         </div>
       </div>
     </>
-  );
-}
-
-/**
- * A stylised code block derived from the link code — deterministic, so the same
- * code always draws the same pattern. Labelled as a preview in the UI because it
- * is not a scannable QR symbol; that gets generated with the real token.
- */
-function QrPreview({ code }: { code: string }) {
-  const cells = useMemo(() => {
-    const seed = [...code].reduce((a, c, i) => a + c.charCodeAt(0) * (i + 7), 0);
-    return Array.from({ length: 169 }, (_, i) => {
-      const x = i % 13;
-      const y = Math.floor(i / 13);
-      const finder = (x < 3 && y < 3) || (x > 9 && y < 3) || (x < 3 && y > 9);
-      const quiet = (x < 4 && y < 4) || (x > 8 && y < 4) || (x < 4 && y > 8);
-      if (finder) return true;
-      if (quiet) return false;
-      const v = Math.sin(x * 12.9898 + y * 78.233 + seed) * 43758.5453;
-      return v - Math.floor(v) > 0.47;
-    });
-  }, [code]);
-
-  return (
-    <div className="grid gap-[2px]" style={{ gridTemplateColumns: "repeat(13, 1fr)" }} aria-hidden="true">
-      {cells.map((on, i) => (
-        <span key={i} className={cn("h-2 w-2 rounded-[1px]", on ? "bg-paper-50" : "bg-transparent")} />
-      ))}
-    </div>
   );
 }

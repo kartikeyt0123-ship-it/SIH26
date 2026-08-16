@@ -18,7 +18,7 @@ import {
 } from "./catalog";
 import type { CustomerSpec } from "./recommend";
 import { requiredPrep } from "./recommend";
-import type { Measurements, SelectedScheme } from "./store";
+import type { Measurements, SelectedScheme } from "./session-types";
 
 const SQFT_PER_SQM = 10.7639;
 /** ASSUMPTION: standard door 2.0 × 0.9 m, standard window 1.5 × 1.2 m. */

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
@@ -8,33 +8,36 @@ import {
   ArrowRight,
   Camera,
   Check,
+  Heart,
   Loader2,
   RefreshCw,
   Sparkles,
   X,
 } from "lucide-react";
 import { LogoMark, Wordmark } from "@/components/brand/Logo";
-import {
-  AVAILABLE_SHADES,
-  DEALER_BRANDS,
-  type Budget,
-  type Finish,
-  type Shade,
-} from "@/lib/catalog";
 import { deltaBand } from "@/lib/color";
-import { recommendSchemes, type CustomerSpec, type Scheme } from "@/lib/recommend";
+import type { CustomerSpec, Scheme } from "@/lib/recommend";
 import { buildQuote, computeAreas } from "@/lib/quote";
+import type { Measurements, SelectedScheme, SessionDTO } from "@/lib/session-types";
 import {
+  chooseDesign,
+  deleteImage,
+  fetchCatalogue,
+  fetchRecommendations,
   formatRemaining,
-  useSession,
-  type Measurements,
-  type SelectedScheme,
+  patchSession,
+  removeDesign,
+  saveDesign,
+  submitSession,
+  uploadImages,
+  useCustomerSession,
+  type DealerCatalogue,
 } from "@/lib/store";
-import { analyzeRoomPhotos, fileToThumbnail, strongestTone, type RoomModel } from "@/lib/vision";
+import { analyzeRoomPhotos, strongestTone, type RoomModel } from "@/lib/vision";
 import { cn, inr } from "@/lib/utils";
 
-// The viewer pulls in three.js; a customer on a counter phone should not
-// download it until there is actually a room to show.
+// three.js only loads once there is a room to show — a customer on a counter
+// phone should not pay for it during the questions.
 const RoomViewer = dynamic(
   () => import("@/components/three/RoomViewer").then((m) => m.RoomViewer),
   {
@@ -47,7 +50,7 @@ const RoomViewer = dynamic(
   },
 );
 
-const STEPS = ["Start", "Your needs", "Photos", "Your room", "Colours", "Size", "Send"];
+const STEPS = ["Start", "Needs", "Photos", "Room", "Colours", "Size", "Review"];
 
 const DEFAULT_SPEC: CustomerSpec = {
   surface: "interior",
@@ -74,43 +77,67 @@ const DEFAULT_MEASURE: Measurements = {
 type Roles = "main" | "feature" | "ceiling" | "trim";
 
 export function CustomerApp({ code }: { code: string }) {
-  const { session, ready, patch } = useSession(code);
+  const { session, state, apply } = useCustomerSession(code);
 
   const [step, setStep] = useState(0);
   const [spec, setSpec] = useState<CustomerSpec>(DEFAULT_SPEC);
-  const [photos, setPhotos] = useState<string[]>([]);
+  const [measure, setMeasure] = useState<Measurements>(DEFAULT_MEASURE);
   const [room, setRoom] = useState<RoomModel | null>(null);
-  const [analysing, setAnalysing] = useState(false);
+  const [catalogue, setCatalogue] = useState<DealerCatalogue | null>(null);
+  const [schemes, setSchemes] = useState<Scheme[]>([]);
   const [schemeId, setSchemeId] = useState<string | null>(null);
   const [overrides, setOverrides] = useState<Partial<Record<Roles, Shade>>>({});
-  const [measure, setMeasure] = useState<Measurements>(DEFAULT_MEASURE);
+  const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState("");
+  const [error, setError] = useState<string | null>(null);
   const hydrated = useRef(false);
 
-  /* ---- rehydrate whatever the customer already did on a previous visit ---- */
+  /* ---- catalogue: brands and paint types come from the dealer (§8, §9) ---- */
   useEffect(() => {
-    if (!ready || !session || hydrated.current) return;
-    hydrated.current = true;
-    if (session.spec) setSpec(session.spec);
-    if (session.photos?.length) setPhotos(session.photos);
-    if (session.room) setRoom(session.room);
-    if (session.measurements) setMeasure(session.measurements);
-    if (session.scheme) setSchemeId(session.scheme.id);
-    if (session.status === "submitted" || session.status === "quoted") setStep(6);
-    else if (session.step) setStep(Math.min(session.step, 5));
-    patch({ opens: (session.opens ?? 0) + 1 });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, session]);
+    fetchCatalogue().then(setCatalogue).catch(() => setCatalogue(null));
+  }, []);
 
+  /* ---- resume whatever the customer already did, within the window ---- */
+  useEffect(() => {
+    if (state !== "ready" || !session || hydrated.current) return;
+    hydrated.current = true;
+    const p = session.project;
+    if (p?.spec) setSpec({ ...DEFAULT_SPEC, ...(p.spec as unknown as CustomerSpec) });
+    if (p?.measurements) setMeasure({ ...DEFAULT_MEASURE, ...(p.measurements as unknown as Measurements) });
+    if (p?.room) setRoom(p.room as unknown as RoomModel);
+    if (session.status === "SUBMITTED") setStep(7);
+    else if (p?.step) setStep(Math.min(p.step, 6));
+  }, [state, session]);
+
+  const photos = session?.project?.images ?? [];
+  const saved = session?.project?.savedDesigns ?? [];
   const photoAnchor = room ? strongestTone(room) : undefined;
 
-  const schemes = useMemo(
-    () => recommendSchemes(spec, { photoHex: photoAnchor, limit: 5 }),
-    [spec, photoAnchor],
+  /* ---- recommendations, computed on the server against live stock ---- */
+  const loadSchemes = useCallback(
+    async (forSpec: CustomerSpec) => {
+      setBusy("recommend");
+      try {
+        const r = await fetchRecommendations({
+          token: code,
+          spec: forSpec,
+          photoHex: photoAnchor,
+          limit: 5,
+        });
+        setSchemes(r.schemes);
+        if (r.schemes.length && !r.schemes.some((s) => s.id === schemeId)) {
+          setSchemeId(r.schemes[0].id);
+        }
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        setBusy(null);
+      }
+    },
+    [code, photoAnchor, schemeId],
   );
 
-  const activeScheme: Scheme | undefined =
-    schemes.find((s) => s.id === schemeId) ?? schemes[0];
+  const activeScheme = schemes.find((s) => s.id === schemeId) ?? schemes[0];
 
   const colors = useMemo(() => {
     const base = activeScheme?.shades;
@@ -122,116 +149,166 @@ export function CustomerApp({ code }: { code: string }) {
     };
   }, [activeScheme, overrides]);
 
-  const finalShades = useMemo(() => {
+  const currentSelection: SelectedScheme | null = useMemo(() => {
     if (!activeScheme) return null;
     const pick = (r: Roles) => overrides[r] ?? activeScheme.shades[r];
+    const slim = (s: Shade) => ({ code: s.code, name: s.name, hex: s.hex });
     return {
-      main: pick("main"),
-      feature: pick("feature"),
-      ceiling: pick("ceiling"),
-      trim: pick("trim"),
+      id: activeScheme.id + (Object.keys(overrides).length ? "+custom" : ""),
+      title: activeScheme.title,
+      rationale: activeScheme.rationale,
+      lineId: activeScheme.line.id,
+      trimLineId: activeScheme.trimLine?.id ?? null,
+      shades: {
+        main: slim(pick("main")),
+        feature: slim(pick("feature")),
+        ceiling: slim(pick("ceiling")),
+        trim: slim(pick("trim")),
+      },
     };
   }, [activeScheme, overrides]);
 
-  const selected: SelectedScheme | null =
-    activeScheme && finalShades
-      ? {
-          id: activeScheme.id,
-          title: activeScheme.title,
-          rationale: activeScheme.rationale,
-          lineId: activeScheme.line.id,
-          trimLineId: activeScheme.trimLine?.id ?? null,
-          shades: {
-            main: slim(finalShades.main),
-            feature: slim(finalShades.feature),
-            ceiling: slim(finalShades.ceiling),
-            trim: slim(finalShades.trim),
-          },
-        }
-      : null;
+  const chosen = saved.find((d) => d.isChosen)?.scheme as unknown as SelectedScheme | undefined;
+  const forQuote = chosen ?? currentSelection;
 
   const quote = useMemo(
-    () => (selected ? buildQuote(spec, selected, measure) : null),
-    [selected, spec, measure],
+    () => (forQuote ? buildQuote(spec, forQuote, measure) : null),
+    [forQuote, spec, measure],
   );
 
   /* -------------------------------- guards -------------------------------- */
 
-  if (!ready) return <Splash>Opening your session…</Splash>;
-  if (!session)
+  if (state === "loading") return <Splash>Opening your session…</Splash>;
+
+  if (state === "missing")
     return (
       <Splash>
         <p className="text-paper-50">We could not find session {code}.</p>
         <p className="mt-2 text-[0.875rem] text-paper-400">
           Ask your dealer to issue a new code.
         </p>
-        <Link href="/c" className="mt-6 text-[0.875rem] text-pigment-soft underline underline-offset-4">
+        <Link href="/c" className="mt-6 inline-block text-[0.875rem] text-pigment-soft underline underline-offset-4">
           Try another code
         </Link>
       </Splash>
     );
-  if (session.status === "expired")
+
+  if (state === "expired")
     return (
       <Splash>
-        <p className="text-paper-50">This session has expired.</p>
+        <p className="text-paper-50">This customer session has expired.</p>
         <p className="mt-2 max-w-xs text-[0.875rem] text-paper-400">
-          Codes stay open for up to three days so prices and stock stay honest. Your dealer
-          can issue a fresh one in a moment.
+          Please request a new link from your dealer. Links are short-lived so prices and
+          stock stay honest.
         </p>
       </Splash>
     );
 
+  if (!session) return <Splash>Opening your session…</Splash>;
+
   /* ------------------------------- handlers ------------------------------- */
 
-  const goto = (n: number) => {
+  const goto = async (n: number) => {
     setStep(n);
-    patch({ step: n, status: session.status === "issued" ? "in_progress" : session.status });
     window.scrollTo({ top: 0, behavior: "smooth" });
+    try {
+      const r = await patchSession(code, { step: n });
+      apply(r.session);
+    } catch {
+      /* a failed step save is not worth interrupting the customer for */
+    }
   };
 
-  const addPhotos = async (files: FileList | null) => {
-    if (!files) return;
-    const room = Array.from(files).slice(0, 3 - photos.length);
-    const thumbs = await Promise.all(room.map((f) => fileToThumbnail(f).catch(() => null)));
-    const next = [...photos, ...thumbs.filter(Boolean) as string[]].slice(0, 3);
-    setPhotos(next);
-    patch({ photos: next });
+  const saveSpec = async (next: CustomerSpec) => {
+    setSpec(next);
+    try {
+      const r = await patchSession(code, { spec: next });
+      apply(r.session);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const onUpload = async (files: FileList | null) => {
+    if (!files?.length) return;
+    setBusy("upload");
+    setError(null);
+    try {
+      const r = await uploadImages(code, Array.from(files));
+      apply(r.session);
+      if (r.rejected.length) setError(r.rejected.map((x) => x.reason).join(" "));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onRemovePhoto = async (id: string) => {
+    const r = await deleteImage(code, id);
+    apply(r.session);
   };
 
   const runAnalysis = async () => {
-    setAnalysing(true);
+    setBusy("analyse");
     goto(3);
-    // A visible beat: the customer just uploaded photographs and needs to see
-    // that something is being done with them.
+    const urls = photos.map((p) => p.url);
     const [model] = await Promise.all([
-      analyzeRoomPhotos(photos),
-      new Promise((r) => setTimeout(r, 900)),
+      analyzeRoomPhotos(urls),
+      new Promise((r) => setTimeout(r, 700)),
     ]);
     setRoom(model);
-    patch({ room: model, spec });
-    setAnalysing(false);
+    try {
+      const r = await patchSession(code, {
+        room: model as unknown as Record<string, unknown>,
+        roomEngine: "heuristic-v1",
+        roomConfidence: model.confidence,
+        spec,
+      });
+      apply(r.session);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+    setBusy(null);
+    loadSchemes(spec);
   };
 
-  const submit = () => {
-    if (!selected || !quote) return;
-    patch({
-      status: "submitted",
-      spec,
-      scheme: selected,
-      measurements: measure,
-      submittedAt: Date.now(),
-      quoteTotal: quote.subtotal,
-      customerNote: note.trim() || undefined,
-      step: 6,
-    });
-    setStep(6);
-    window.scrollTo({ top: 0 });
+  const onSaveFavourite = async () => {
+    if (!currentSelection) return;
+    setBusy("save");
+    try {
+      const r = await saveDesign(code, {
+        schemeId: currentSelection.id,
+        label: currentSelection.title,
+        scheme: currentSelection,
+      });
+      apply(r.session);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const submit = async () => {
+    setBusy("submit");
+    try {
+      await patchSession(code, { spec, measurements: measure });
+      const r = await submitSession(code, note.trim() || undefined);
+      apply(r.session);
+      setStep(7);
+      window.scrollTo({ top: 0 });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
   };
 
   /* --------------------------------- view --------------------------------- */
 
   return (
-    <div className="min-h-[100svh] bg-ink-900 pb-28">
+    <div className="min-h-[100svh] bg-ink-900 pb-24">
       <header className="sticky top-0 z-30 border-b border-[color-mix(in_oklab,var(--color-paper-200)_10%,transparent)] bg-[color-mix(in_oklab,var(--color-ink-900)_88%,transparent)] backdrop-blur-xl">
         <div className="mx-auto flex max-w-2xl items-center justify-between px-5 py-3">
           <span className="flex items-center gap-2 text-[0.95rem]">
@@ -239,37 +316,38 @@ export function CustomerApp({ code }: { code: string }) {
             <Wordmark />
           </span>
           <span className="data text-[0.625rem] tracking-[0.1em] text-paper-400 uppercase">
-            {session.code} · {formatRemaining(session)} left
+            {session.token.slice(0, 5)} · {formatRemaining(session.hoursLeft)} left
           </span>
         </div>
-        {session.status !== "submitted" && (
+        {step < 7 && (
           <div className="mx-auto flex max-w-2xl gap-1 px-5 pb-3">
             {STEPS.map((s, i) => (
-              <span key={s} className="flex-1">
-                <span
-                  className={cn(
-                    "block h-[3px] rounded-full transition-colors duration-500",
-                    i <= step ? "bg-pigment" : "bg-ink-700",
-                  )}
-                />
-              </span>
+              <span
+                key={s}
+                className={cn(
+                  "h-[3px] flex-1 rounded-full transition-colors duration-500",
+                  i <= step ? "bg-pigment" : "bg-ink-700",
+                )}
+              />
             ))}
           </div>
         )}
       </header>
 
       <main className="mx-auto max-w-2xl px-5 py-8">
-        {step === 0 && (
-          <Welcome session={session} onNext={() => goto(1)} />
+        {error && (
+          <p className="mb-5 rounded-xl border border-[color-mix(in_oklab,var(--color-pigment)_40%,transparent)] bg-[color-mix(in_oklab,var(--color-pigment)_8%,transparent)] px-4 py-3 text-[0.8125rem] text-paper-100">
+            {error}
+          </p>
         )}
+
+        {step === 0 && <Welcome session={session} onNext={() => goto(1)} />}
 
         {step === 1 && (
           <Questions
             spec={spec}
-            setSpec={(s) => {
-              setSpec(s);
-              patch({ spec: s });
-            }}
+            catalogue={catalogue}
+            setSpec={saveSpec}
             onNext={() => goto(2)}
           />
         )}
@@ -277,12 +355,9 @@ export function CustomerApp({ code }: { code: string }) {
         {step === 2 && (
           <PhotoStep
             photos={photos}
-            onAdd={addPhotos}
-            onRemove={(i) => {
-              const next = photos.filter((_, j) => j !== i);
-              setPhotos(next);
-              patch({ photos: next });
-            }}
+            busy={busy === "upload"}
+            onAdd={onUpload}
+            onRemove={onRemovePhoto}
             onBack={() => goto(1)}
             onNext={runAnalysis}
           />
@@ -290,12 +365,15 @@ export function CustomerApp({ code }: { code: string }) {
 
         {step === 3 && (
           <RoomStep
-            analysing={analysing}
+            analysing={busy === "analyse"}
             room={room}
             photos={photos}
             onBack={() => goto(2)}
             onRedo={runAnalysis}
-            onNext={() => goto(4)}
+            onNext={() => {
+              if (!schemes.length) loadSchemes(spec);
+              goto(4);
+            }}
           />
         )}
 
@@ -303,6 +381,7 @@ export function CustomerApp({ code }: { code: string }) {
           <ColourStep
             room={room}
             schemes={schemes}
+            loading={busy === "recommend"}
             activeScheme={activeScheme}
             colors={colors}
             overrides={overrides}
@@ -311,7 +390,13 @@ export function CustomerApp({ code }: { code: string }) {
               setSchemeId(id);
               setOverrides({});
             }}
+            catalogue={catalogue}
             spec={spec}
+            saved={saved}
+            savingFavourite={busy === "save"}
+            onSaveFavourite={onSaveFavourite}
+            onChoose={async (id) => apply((await chooseDesign(code, id)).session)}
+            onRemoveFavourite={async (id) => apply((await removeDesign(code, id)).session)}
             onBack={() => goto(3)}
             onNext={() => goto(5)}
           />
@@ -320,26 +405,41 @@ export function CustomerApp({ code }: { code: string }) {
         {step === 5 && (
           <MeasureStep
             measure={measure}
-            setMeasure={(m) => {
+            setMeasure={async (m) => {
               setMeasure(m);
-              patch({ measurements: m });
+              try {
+                apply((await patchSession(code, { measurements: m, spec })).session);
+              } catch {
+                /* saved again on submit */
+              }
             }}
+            onBack={() => goto(4)}
+            onNext={() => goto(6)}
+          />
+        )}
+
+        {step === 6 && (
+          <ReviewStep
+            session={session}
+            spec={spec}
+            measure={measure}
+            scheme={forQuote}
+            quote={quote}
             note={note}
             setNote={setNote}
-            quote={quote}
-            colors={colors}
-            onBack={() => goto(4)}
+            busy={busy === "submit"}
+            onBack={() => goto(5)}
             onSubmit={submit}
           />
         )}
 
-        {step === 6 && <Done session={session} />}
+        {step === 7 && <Done session={session} />}
       </main>
     </div>
   );
 }
 
-const slim = (s: Shade) => ({ code: s.code, name: s.name, hex: s.hex });
+type Shade = { code: string; name: string; hex: string; wallSafe: boolean; exteriorSuitable: boolean; family: string };
 
 /* ============================== step screens ============================== */
 
@@ -352,7 +452,7 @@ function Splash({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Welcome({ session, onNext }: { session: { customerName: string }; onNext: () => void }) {
+function Welcome({ session, onNext }: { session: SessionDTO; onNext: () => void }) {
   return (
     <div>
       <span className="eyebrow">Sharma Interiors & Hardware</span>
@@ -360,18 +460,21 @@ function Welcome({ session, onNext }: { session: { customerName: string }; onNex
         Let’s see it on your own walls.
       </h1>
       <p className="mt-4 text-[1rem] leading-relaxed text-paper-300">
-        Five short questions, two or three photographs of the room, and you will get colour
-        combinations that your dealer can actually supply — with a price you can check.
+        A few short questions, two or three photographs, and you will get colour
+        combinations your dealer can actually supply — with a price you can check.
       </p>
 
       <ol className="mt-8 flex flex-col gap-3">
         {[
-          ["Tell us what the room needs", "Type of paint, budget, brand if you have a preference."],
+          ["Tell us what the room needs", "Paint type, budget, brand if you have a preference."],
           ["Photograph the space", "Two or three pictures from different corners."],
-          ["We rebuild the room", "So you can see colours on your walls, not on a card."],
-          ["Choose and send", "Your dealer gets the design and prices it."],
+          ["We rebuild the room", "So you see colours on your walls, not on a card."],
+          ["Shortlist and send", "Save the ones you like; your dealer prices them."],
         ].map(([t, b], i) => (
-          <li key={t} className="flex gap-4 rounded-2xl border border-[color-mix(in_oklab,var(--color-paper-200)_10%,transparent)] p-4">
+          <li
+            key={t}
+            className="flex gap-4 rounded-2xl border border-[color-mix(in_oklab,var(--color-paper-200)_10%,transparent)] p-4"
+          >
             <span className="data text-[0.75rem] text-pigment">0{i + 1}</span>
             <span>
               <span className="block text-[0.9375rem] text-paper-50">{t}</span>
@@ -390,24 +493,31 @@ function Welcome({ session, onNext }: { session: { customerName: string }; onNex
 
 function Questions({
   spec,
+  catalogue,
   setSpec,
   onNext,
 }: {
   spec: CustomerSpec;
+  catalogue: DealerCatalogue | null;
   setSpec: (s: CustomerSpec) => void;
   onNext: () => void;
 }) {
   const set = <K extends keyof CustomerSpec>(k: K, v: CustomerSpec[K]) =>
     setSpec({ ...spec, [k]: v });
 
+  // §8 / §9 — never hardcoded. If the dealer does not stock a brand or a
+  // category, the customer is never offered it.
+  const brands = catalogue?.brands ?? [];
+  const categories = catalogue?.categories ?? [];
+
   return (
     <div className="flex flex-col gap-8">
       <div>
-        <span className="eyebrow">Step 1 of 5</span>
-        <h1 className="display mt-3 text-[2rem]">What does the room need?</h1>
+        <span className="eyebrow">Step 1 of 6</span>
+        <h1 className="display mt-3 text-[2rem]">What does the space need?</h1>
       </div>
 
-      <Q label="Where is the wall?">
+      <Q label="Where are you painting?">
         <Choice
           options={[
             { v: "interior", l: "Inside" },
@@ -418,7 +528,40 @@ function Questions({
         />
       </Q>
 
-      <Q label="Is there damp, seepage or peeling?" hint="This decides the primer, and it is not optional if the answer is yes.">
+      <Q label="Which room or surface?">
+        <Choice
+          options={["Living room", "Bedroom", "Kitchen", "Bathroom", "Whole house", "Office", "Shop front"].map(
+            (r) => ({ v: r, l: r }),
+          )}
+          value={spec.roomType}
+          onChange={(v) => set("roomType", v)}
+        />
+      </Q>
+
+      {categories.length > 0 && (
+        <Q label="What kind of paint?" hint="These are the types your dealer carries.">
+          <Choice
+            options={[
+              { v: "any", l: "Not sure — advise me" },
+              ...categories.map((c) => ({ v: c.slug, l: c.label })),
+            ]}
+            value={spec.waterproofing ? "waterproofing" : "any"}
+            onChange={(v) =>
+              setSpec({
+                ...spec,
+                waterproofing: v === "waterproofing",
+                surface: v === "exterior" ? "exterior" : v === "interior" ? "interior" : spec.surface,
+                condition: v === "waterproofing" ? ["dampness"] : spec.condition,
+              })
+            }
+          />
+        </Q>
+      )}
+
+      <Q
+        label="Is there damp, seepage or peeling?"
+        hint="This decides the primer, and it is not optional if the answer is yes."
+      >
         <Choice
           options={[
             { v: "no", l: "No" },
@@ -444,20 +587,25 @@ function Questions({
             { v: "premium", l: "Premium" },
           ]}
           value={spec.budget}
-          onChange={(v) => set("budget", v as Budget)}
+          onChange={(v) => set("budget", v as CustomerSpec["budget"])}
         />
       </Q>
 
-      <Q label="Any brand preference?" hint="Only brands your dealer stocks are shown. Leave it blank if you don’t mind.">
+      <Q
+        label="Any brand preference?"
+        hint={
+          brands.length
+            ? "Only brands this dealer stocks are shown. Leave it blank for the best available."
+            : "Loading the dealer’s brands…"
+        }
+      >
         <div className="flex flex-wrap gap-2">
-          {DEALER_BRANDS.map((b) => {
+          {brands.map((b) => {
             const on = spec.brands.includes(b);
             return (
               <button
                 key={b}
-                onClick={() =>
-                  set("brands", on ? spec.brands.filter((x) => x !== b) : [...spec.brands, b])
-                }
+                onClick={() => set("brands", on ? spec.brands.filter((x) => x !== b) : [...spec.brands, b])}
                 className={cn(
                   "rounded-full border px-4 py-2.5 text-[0.875rem] transition-colors duration-200",
                   on
@@ -469,6 +617,14 @@ function Questions({
               </button>
             );
           })}
+          {spec.brands.length > 0 && (
+            <button
+              onClick={() => set("brands", [])}
+              className="rounded-full px-3 py-2.5 text-[0.8125rem] text-paper-400 underline underline-offset-4"
+            >
+              No preference
+            </button>
+          )}
         </div>
       </Q>
 
@@ -494,22 +650,11 @@ function Questions({
             { v: "soft-sheen", l: "Soft sheen" },
           ]}
           value={spec.finish}
-          onChange={(v) => set("finish", v as Finish | "any")}
+          onChange={(v) => set("finish", v as CustomerSpec["finish"])}
         />
       </Q>
 
-      <Q label="Which room?">
-        <Choice
-          options={["Living room", "Bedroom", "Kitchen", "Bathroom", "Exterior"].map((r) => ({
-            v: r,
-            l: r,
-          }))}
-          value={spec.roomType}
-          onChange={(v) => set("roomType", v)}
-        />
-      </Q>
-
-      <Next onClick={onNext} className="mt-4">
+      <Next onClick={onNext} className="mt-2">
         Next · photographs
       </Next>
     </div>
@@ -518,33 +663,35 @@ function Questions({
 
 function PhotoStep({
   photos,
+  busy,
   onAdd,
   onRemove,
   onBack,
   onNext,
 }: {
-  photos: string[];
+  photos: { id: string; url: string }[];
+  busy: boolean;
   onAdd: (f: FileList | null) => void;
-  onRemove: (i: number) => void;
+  onRemove: (id: string) => void;
   onBack: () => void;
   onNext: () => void;
 }) {
   return (
     <div>
-      <span className="eyebrow">Step 2 of 5</span>
-      <h1 className="display mt-3 text-[2rem]">Photograph the room.</h1>
+      <span className="eyebrow">Step 2 of 6</span>
+      <h1 className="display mt-3 text-[2rem]">Photograph the space.</h1>
       <p className="mt-3 text-[0.9375rem] leading-relaxed text-paper-300">
-        Two or three pictures, from different corners, with as much of the wall and floor in
+        Two or three pictures from different corners, with as much of the wall and floor in
         frame as you can manage. Daylight helps.
       </p>
 
       <div className="mt-6 grid grid-cols-3 gap-3">
-        {photos.map((p, i) => (
-          <div key={i} className="relative aspect-[3/4] overflow-hidden rounded-xl">
+        {photos.map((p) => (
+          <div key={p.id} className="relative aspect-[3/4] overflow-hidden rounded-xl">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={p} alt={`Room ${i + 1}`} className="h-full w-full object-cover" />
+            <img src={p.url} alt="Your space" className="h-full w-full object-cover" />
             <button
-              onClick={() => onRemove(i)}
+              onClick={() => onRemove(p.id)}
               aria-label="Remove"
               className="absolute top-1.5 right-1.5 flex h-6 w-6 items-center justify-center rounded-full bg-ink-900/80 text-paper-100"
             >
@@ -554,9 +701,18 @@ function PhotoStep({
         ))}
 
         {photos.length < 3 && (
-          <label className="flex aspect-[3/4] cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-[color-mix(in_oklab,var(--color-paper-200)_22%,transparent)] text-paper-400 transition-colors hover:border-[color-mix(in_oklab,var(--color-pigment)_50%,transparent)] hover:text-paper-200">
-            <Camera className="h-5 w-5" strokeWidth={1.5} />
-            <span className="text-[0.6875rem]">Add photo</span>
+          <label
+            className={cn(
+              "flex aspect-[3/4] cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-[color-mix(in_oklab,var(--color-paper-200)_22%,transparent)] text-paper-400 transition-colors hover:border-[color-mix(in_oklab,var(--color-pigment)_50%,transparent)] hover:text-paper-200",
+              busy && "pointer-events-none opacity-50",
+            )}
+          >
+            {busy ? (
+              <Loader2 className="h-5 w-5 animate-spin" strokeWidth={1.6} />
+            ) : (
+              <Camera className="h-5 w-5" strokeWidth={1.5} />
+            )}
+            <span className="text-[0.6875rem]">{busy ? "Uploading" : "Add photo"}</span>
             <input
               type="file"
               accept="image/*"
@@ -570,9 +726,9 @@ function PhotoStep({
       </div>
 
       <p className="mt-5 rounded-xl border border-[color-mix(in_oklab,var(--color-paper-200)_10%,transparent)] p-4 text-[0.8125rem] leading-relaxed text-paper-400">
-        Your photographs are processed on this phone and stored with your session only. They
-        are used to rebuild the room’s proportions and read the tones already in it — not to
-        measure it. You will enter the size yourself in a moment.
+        Your photographs are uploaded to your dealer&rsquo;s Rachna account and used to rebuild
+        the room&rsquo;s proportions and read the tones already in it — not to measure it. You
+        will enter the size yourself in a moment.
       </p>
 
       <div className="mt-6 flex gap-3">
@@ -595,7 +751,7 @@ function RoomStep({
 }: {
   analysing: boolean;
   room: RoomModel | null;
-  photos: string[];
+  photos: { id: string; url: string }[];
   onBack: () => void;
   onRedo: () => void;
   onNext: () => void;
@@ -605,7 +761,7 @@ function RoomStep({
       <div className="flex min-h-[50vh] flex-col items-center justify-center gap-5 text-center">
         <Loader2 className="h-7 w-7 animate-spin text-pigment" strokeWidth={1.6} />
         <div>
-          <p className="text-[1rem] text-paper-50">Reading your photographs…</p>
+          <p className="text-[1rem] text-paper-50">Analysing your space…</p>
           <p className="mt-2 text-[0.8125rem] text-paper-400">
             Finding the floor line, the light and the tones already in the room.
           </p>
@@ -615,13 +771,13 @@ function RoomStep({
 
   return (
     <div>
-      <span className="eyebrow">Step 3 of 5</span>
+      <span className="eyebrow">Step 3 of 6</span>
       <h1 className="display mt-3 text-[2rem]">Here is your room.</h1>
 
       <div className="mt-5 grid grid-cols-3 gap-2">
-        {photos.map((p, i) => (
+        {photos.map((p) => (
           // eslint-disable-next-line @next/next/no-img-element
-          <img key={i} src={p} alt="" className="aspect-[3/4] w-full rounded-lg object-cover opacity-70" />
+          <img key={p.id} src={p.url} alt="" className="aspect-[3/4] w-full rounded-lg object-cover opacity-70" />
         ))}
       </div>
 
@@ -689,43 +845,58 @@ const ROLE_LABEL: Record<Roles, string> = {
   trim: "Doors & frames",
 };
 
-function ColourStep({
-  room,
-  schemes,
-  activeScheme,
-  colors,
-  overrides,
-  setOverrides,
-  onPick,
-  spec,
-  onBack,
-  onNext,
-}: {
+function ColourStep(props: {
   room: RoomModel;
   schemes: Scheme[];
+  loading: boolean;
   activeScheme?: Scheme;
   colors: { main: string; feature: string; ceiling: string; trim: string };
   overrides: Partial<Record<Roles, Shade>>;
   setOverrides: (o: Partial<Record<Roles, Shade>>) => void;
   onPick: (id: string) => void;
+  catalogue: DealerCatalogue | null;
   spec: CustomerSpec;
+  saved: { id: string; label: string | null; scheme: Record<string, unknown>; isChosen: boolean }[];
+  savingFavourite: boolean;
+  onSaveFavourite: () => void;
+  onChoose: (id: string) => void;
+  onRemoveFavourite: (id: string) => void;
   onBack: () => void;
   onNext: () => void;
 }) {
+  const {
+    room, schemes, loading, activeScheme, colors, overrides, setOverrides, onPick,
+    catalogue, spec, saved, savingFavourite, onSaveFavourite, onChoose, onRemoveFavourite,
+    onBack, onNext,
+  } = props;
+
   const [editing, setEditing] = useState<Roles | null>(null);
 
+  // Only shades the dealer can produce today reach this grid (§15).
   const pool = useMemo(
     () =>
-      AVAILABLE_SHADES.filter((s) =>
+      (catalogue?.shades ?? []).filter((s) =>
         spec.surface === "exterior" ? s.exteriorSuitable : true,
       ),
-    [spec.surface],
+    [catalogue, spec.surface],
   );
+
+  if (loading)
+    return (
+      <div className="flex min-h-[40vh] flex-col items-center justify-center gap-4 text-center">
+        <Loader2 className="h-6 w-6 animate-spin text-pigment" strokeWidth={1.6} />
+        <p className="text-[0.9375rem] text-paper-200">
+          Matching combinations against your dealer&rsquo;s stock…
+        </p>
+      </div>
+    );
 
   if (!activeScheme)
     return (
       <div className="py-16 text-center">
-        <p className="text-paper-50">No combination fits those answers and this dealer’s stock.</p>
+        <p className="text-paper-50">
+          No combination fits those answers and this dealer&rsquo;s current stock.
+        </p>
         <p className="mt-2 text-[0.875rem] text-paper-400">
           Try removing the brand preference, or widening the budget.
         </p>
@@ -735,10 +906,10 @@ function ColourStep({
 
   return (
     <div>
-      <span className="eyebrow">Step 4 of 5</span>
-      <h1 className="display mt-3 text-[2rem]">Try them on the walls.</h1>
+      <span className="eyebrow">Step 4 of 6</span>
+      <h1 className="display mt-3 text-[2rem]">Try them on your walls.</h1>
       <p className="mt-2 text-[0.875rem] text-paper-400">
-        Drag to look around. Every combination below is producible at this dealer today.
+        Drag to look around. Everything below is producible at this dealer today.
       </p>
 
       <div className="relative mt-5 aspect-[4/5] overflow-hidden rounded-2xl border border-[color-mix(in_oklab,var(--color-paper-200)_12%,transparent)] sm:aspect-[4/3]">
@@ -748,7 +919,6 @@ function ColourStep({
         </span>
       </div>
 
-      {/* per-surface swatches */}
       <div className="mt-4 grid grid-cols-4 gap-2">
         {(Object.keys(ROLE_LABEL) as Roles[]).map((r) => {
           const shade = overrides[r] ?? activeScheme.shades[r];
@@ -763,10 +933,7 @@ function ColourStep({
                   : "border-[color-mix(in_oklab,var(--color-paper-200)_12%,transparent)]",
               )}
             >
-              <span
-                style={{ background: shade.hex }}
-                className="block h-8 w-full rounded-md ring-1 ring-white/10"
-              />
+              <span style={{ background: shade.hex }} className="block h-8 w-full rounded-md ring-1 ring-white/10" />
               <span className="mt-1.5 block text-[0.625rem] leading-tight text-paper-400">
                 {ROLE_LABEL[r]}
               </span>
@@ -791,7 +958,7 @@ function ColourStep({
               return (
                 <button
                   key={s.code}
-                  onClick={() => setOverrides({ ...overrides, [editing]: s })}
+                  onClick={() => setOverrides({ ...overrides, [editing]: s as Shade })}
                   title={`${s.name} · ${s.code}`}
                   style={{ background: s.hex }}
                   className={cn(
@@ -803,8 +970,7 @@ function ColourStep({
             })}
           </div>
           <p className="mt-3 text-[0.75rem] text-paper-400">
-            Every swatch here is one this dealer can produce today. Shades he cannot tint are
-            not shown at all.
+            Shades your dealer cannot produce today are not shown at all.
           </p>
           {Object.keys(overrides).length > 0 && (
             <button
@@ -817,16 +983,73 @@ function ColourStep({
         </div>
       )}
 
-      {/* schemes */}
+      <button
+        onClick={onSaveFavourite}
+        disabled={savingFavourite}
+        className="mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-full border border-[color-mix(in_oklab,var(--color-pigment)_50%,transparent)] bg-[color-mix(in_oklab,var(--color-pigment)_10%,transparent)] text-[0.9375rem] text-paper-50 disabled:opacity-50"
+      >
+        <Heart className="h-4 w-4" strokeWidth={1.8} />
+        {savingFavourite ? "Saving…" : "Save this combination"}
+      </button>
+
+      {saved.length > 0 && (
+        <div className="mt-5">
+          <span className="eyebrow">Your shortlist · {saved.length}</span>
+          <div className="mt-3 flex flex-col gap-2">
+            {saved.map((d) => {
+              const sc = d.scheme as unknown as SelectedScheme;
+              return (
+                <div
+                  key={d.id}
+                  className={cn(
+                    "flex items-center gap-3 rounded-xl border p-3",
+                    d.isChosen
+                      ? "border-[color-mix(in_oklab,var(--color-glaze)_55%,transparent)] bg-[color-mix(in_oklab,var(--color-glaze)_10%,transparent)]"
+                      : "border-[color-mix(in_oklab,var(--color-paper-200)_12%,transparent)]",
+                  )}
+                >
+                  <span className="flex shrink-0 gap-1">
+                    {Object.values(sc.shades).map((s) => (
+                      <span key={s.code} style={{ background: s.hex }} className="h-8 w-3 rounded-sm" />
+                    ))}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[0.875rem] text-paper-100">
+                    {d.label ?? sc.title}
+                  </span>
+                  {d.isChosen ? (
+                    <span className="data shrink-0 text-[0.5625rem] tracking-[0.12em] text-[#7fd6c9] uppercase">
+                      chosen
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => onChoose(d.id)}
+                      className="shrink-0 text-[0.75rem] text-paper-300 underline underline-offset-4"
+                    >
+                      Choose
+                    </button>
+                  )}
+                  <button
+                    onClick={() => onRemoveFavourite(d.id)}
+                    aria-label="Remove"
+                    className="shrink-0 text-paper-400"
+                  >
+                    <X className="h-3.5 w-3.5" strokeWidth={1.8} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div className="mt-7">
         <span className="eyebrow flex items-center gap-2">
           <Sparkles className="h-3.5 w-3.5 text-pigment" strokeWidth={1.8} />
-          Suggested for your room
+          Recommended for you
         </span>
         <div className="mt-3 flex flex-col gap-3">
           {schemes.map((s) => {
             const on = s.id === activeScheme.id;
-            const dE = s.photoDelta;
             return (
               <button
                 key={s.id}
@@ -854,19 +1077,16 @@ function ColourStep({
                       {on && <Check className="h-3.5 w-3.5 text-pigment" strokeWidth={2.4} />}
                     </span>
                     <span className="data mt-0.5 block text-[0.625rem] tracking-[0.08em] text-paper-400 uppercase">
-                      {s.line.brand} {s.line.name} · {s.approach}
+                      {s.line.brand} {s.line.name}
                     </span>
                   </span>
                 </div>
-                <p className="mt-3 text-[0.8125rem] leading-relaxed text-paper-300">
-                  {s.rationale}
+                <p className="mt-3 text-[0.8125rem] leading-relaxed text-paper-300">{s.rationale}</p>
+                <p className="data mt-2 text-[0.625rem] tracking-[0.06em] text-[#5fbfb3]">
+                  ✓ Available at this dealer
+                  {s.photoDelta !== undefined &&
+                    ` · ΔE ${s.photoDelta.toFixed(1)} from your room — ${deltaBand(s.photoDelta)}`}
                 </p>
-                {dE !== undefined && (
-                  <p className="data mt-2 text-[0.625rem] tracking-[0.06em] text-paper-400">
-                    ΔE {dE.toFixed(1)} from the tone already in your photographs —{" "}
-                    {deltaBand(dE)}
-                  </p>
-                )}
               </button>
             );
           })}
@@ -886,21 +1106,13 @@ function ColourStep({
 function MeasureStep({
   measure,
   setMeasure,
-  note,
-  setNote,
-  quote,
-  colors,
   onBack,
-  onSubmit,
+  onNext,
 }: {
   measure: Measurements;
   setMeasure: (m: Measurements) => void;
-  note: string;
-  setNote: (s: string) => void;
-  quote: ReturnType<typeof buildQuote> | null;
-  colors: { main: string; feature: string; ceiling: string; trim: string };
   onBack: () => void;
-  onSubmit: () => void;
+  onNext: () => void;
 }) {
   const areas = computeAreas(measure);
   const set = <K extends keyof Measurements>(k: K, v: Measurements[K]) =>
@@ -908,8 +1120,8 @@ function MeasureStep({
 
   return (
     <div>
-      <span className="eyebrow">Step 5 of 5</span>
-      <h1 className="display mt-3 text-[2rem]">How big is the room?</h1>
+      <span className="eyebrow">Step 5 of 6</span>
+      <h1 className="display mt-3 text-[2rem]">How big is the space?</h1>
       <p className="mt-2 text-[0.875rem] leading-relaxed text-paper-400">
         We do not measure this from your photographs — an estimate from an uncalibrated
         picture would put the whole quotation out. Pace it out or use a tape; approximate is
@@ -941,16 +1153,91 @@ function MeasureStep({
         </dl>
       </div>
 
+      <div className="mt-6 flex gap-3">
+        <Back onClick={onBack} />
+        <Next onClick={onNext} className="flex-1">
+          Review my project
+        </Next>
+      </div>
+    </div>
+  );
+}
+
+function ReviewStep({
+  session,
+  spec,
+  measure,
+  scheme,
+  quote,
+  note,
+  setNote,
+  busy,
+  onBack,
+  onSubmit,
+}: {
+  session: SessionDTO;
+  spec: CustomerSpec;
+  measure: Measurements;
+  scheme: SelectedScheme | null;
+  quote: ReturnType<typeof buildQuote> | null;
+  note: string;
+  setNote: (s: string) => void;
+  busy: boolean;
+  onBack: () => void;
+  onSubmit: () => void;
+}) {
+  const photos = session.project?.images ?? [];
+
+  return (
+    <div>
+      <span className="eyebrow">Step 6 of 6</span>
+      <h1 className="display mt-3 text-[2rem]">Your project.</h1>
+
+      {photos.length > 0 && (
+        <div className="mt-5 grid grid-cols-3 gap-2">
+          {photos.map((p) => (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img key={p.id} src={p.url} alt="" className="aspect-[3/4] w-full rounded-lg object-cover" />
+          ))}
+        </div>
+      )}
+
+      {scheme && (
+        <div className="mt-5 rounded-2xl border border-[color-mix(in_oklab,var(--color-paper-200)_12%,transparent)] p-4">
+          <span className="eyebrow">Selected design</span>
+          <p className="mt-2 text-[1.05rem] text-paper-50">{scheme.title}</p>
+          <div className="mt-3 flex gap-2">
+            {Object.entries(scheme.shades).map(([role, s]) => (
+              <span key={role} className="flex-1 text-center">
+                <span style={{ background: s.hex }} className="block h-12 w-full rounded-lg ring-1 ring-white/10" />
+                <span className="data mt-1 block text-[0.5rem] tracking-[0.06em] text-paper-400 uppercase">
+                  {role}
+                </span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <dl className="mt-4 grid grid-cols-2 gap-3">
+        {[
+          ["Surface", spec.surface === "exterior" ? "Outside" : "Inside"],
+          ["Space", spec.roomType],
+          ["Budget", spec.budget],
+          ["Brand", spec.brands.length ? spec.brands.join(", ") : "No preference"],
+          ["Room", `${measure.lengthM} × ${measure.widthM} × ${measure.heightM} m`],
+          ["Coats", String(measure.coats)],
+        ].map(([k, v]) => (
+          <div key={k} className="rounded-xl border border-[color-mix(in_oklab,var(--color-paper-200)_10%,transparent)] p-3">
+            <dt className="eyebrow">{k}</dt>
+            <dd className="mt-1 text-[0.875rem] text-paper-100 capitalize">{v}</dd>
+          </div>
+        ))}
+      </dl>
+
       {quote && (
         <div className="mt-4 rounded-2xl border border-[color-mix(in_oklab,var(--color-pigment)_35%,transparent)] bg-[color-mix(in_oklab,var(--color-pigment)_7%,transparent)] p-4">
-          <div className="flex items-center justify-between">
-            <span className="eyebrow">Estimated materials</span>
-            <span className="flex gap-1">
-              {Object.values(colors).map((c) => (
-                <span key={c} style={{ background: c }} className="h-4 w-4 rounded-sm ring-1 ring-white/10" />
-              ))}
-            </span>
-          </div>
+          <span className="eyebrow">Estimated materials</span>
           <p className="data mt-2 text-[1.6rem] text-paper-50">{inr(quote.subtotal)}</p>
           <p className="mt-1 text-[0.75rem] text-paper-400">
             {quote.lines.length} items, materials only. Your dealer confirms the final price.
@@ -964,9 +1251,7 @@ function MeasureStep({
                   </span>
                   <span className="data shrink-0 text-paper-50">{inr(l.amount)}</span>
                 </div>
-                <p className="data mt-0.5 text-[0.625rem] leading-relaxed text-paper-400">
-                  {l.working}
-                </p>
+                <p className="data mt-0.5 text-[0.625rem] leading-relaxed text-paper-400">{l.working}</p>
                 {l.why && <p className="mt-1 text-[0.6875rem] text-paper-300">{l.why}</p>}
               </div>
             ))}
@@ -987,34 +1272,35 @@ function MeasureStep({
 
       <div className="mt-6 flex gap-3">
         <Back onClick={onBack} />
-        <Next onClick={onSubmit} className="flex-1">
-          Send to my dealer
+        <Next onClick={onSubmit} disabled={busy || !scheme} className="flex-1">
+          {busy ? "Sending…" : "Submit to dealer"}
         </Next>
       </div>
     </div>
   );
 }
 
-function Done({ session }: { session: { customerName: string; scheme?: SelectedScheme; quoteTotal?: number } }) {
+function Done({ session }: { session: SessionDTO }) {
+  const chosen = session.project?.savedDesigns.find((d) => d.isChosen)?.scheme as
+    | unknown as SelectedScheme
+    | undefined;
+
   return (
     <div className="flex min-h-[60vh] flex-col items-center justify-center text-center">
       <span className="flex h-14 w-14 items-center justify-center rounded-full bg-[color-mix(in_oklab,var(--color-glaze)_25%,transparent)]">
         <Check className="h-6 w-6 text-[#7fd6c9]" strokeWidth={2.2} />
       </span>
-      <h1 className="display mt-6 text-[2rem]">Sent to your dealer.</h1>
+      <h1 className="display mt-6 text-[2rem]">Design submitted successfully.</h1>
       <p className="mt-3 max-w-sm text-[0.9375rem] leading-relaxed text-paper-300">
-        {session.scheme?.title} is now in the queue at Sharma Interiors. They will confirm
-        availability and price, and call you on the number they have.
+        Your selected design has been sent to the dealer. They will confirm availability and
+        price, and call you on the number they have.
       </p>
 
-      {session.scheme && (
+      {chosen && (
         <div className="mt-7 flex gap-1.5">
-          {Object.values(session.scheme.shades).map((s) => (
+          {Object.values(chosen.shades).map((s) => (
             <span key={s.code} className="text-center">
-              <span
-                style={{ background: s.hex }}
-                className="block h-14 w-11 rounded-lg ring-1 ring-white/10"
-              />
+              <span style={{ background: s.hex }} className="block h-14 w-11 rounded-lg ring-1 ring-white/10" />
               <span className="data mt-1.5 block text-[0.5rem] tracking-[0.08em] text-paper-400 uppercase">
                 {s.code}
               </span>
@@ -1023,15 +1309,7 @@ function Done({ session }: { session: { customerName: string; scheme?: SelectedS
         </div>
       )}
 
-      {session.quoteTotal && (
-        <p className="data mt-6 text-[0.8125rem] text-paper-400">
-          Estimated materials {inr(session.quoteTotal)} — subject to your dealer’s confirmation.
-        </p>
-      )}
-
-      <p className="mt-10 text-[0.75rem] text-paper-400">
-        You can close this page. The link stays open until it expires.
-      </p>
+      <p className="mt-10 text-[0.75rem] text-paper-400">You can close this page now.</p>
     </div>
   );
 }
@@ -1116,12 +1394,7 @@ function Toggle({ label, on, onChange }: { label: string; on: boolean; onChange:
       className="flex items-center justify-between rounded-xl border border-[color-mix(in_oklab,var(--color-paper-200)_12%,transparent)] px-4 py-3 text-left"
     >
       <span className="text-[0.9375rem] text-paper-100">{label}</span>
-      <span
-        className={cn(
-          "relative h-6 w-11 rounded-full transition-colors duration-300",
-          on ? "bg-pigment" : "bg-ink-700",
-        )}
-      >
+      <span className={cn("relative h-6 w-11 rounded-full transition-colors duration-300", on ? "bg-pigment" : "bg-ink-700")}>
         <span
           className={cn(
             "absolute top-1 h-4 w-4 rounded-full bg-white transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]",

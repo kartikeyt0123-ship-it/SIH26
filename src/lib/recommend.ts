@@ -18,6 +18,7 @@ import {
   AVAILABLE_SHADES,
   DEALER_LINE_BY_ID,
   PRODUCT_LINES,
+  SHADES,
   dealerCarries,
   pricePerLitre,
   type Budget,
@@ -41,6 +42,19 @@ export type CustomerSpec = {
   condition: string[];
 };
 
+/**
+ * Live availability, read from the dealer's inventory.
+ *
+ * When supplied, this overrides the static catalogue helpers entirely — the
+ * database is the authority on what can be sold, not a constant in the source.
+ * When omitted (the browser, before the API responds) the static overlay is
+ * used so the UI still shows something honest rather than nothing.
+ */
+export type Availability = {
+  stockedLineIds: Set<string>;
+  producibleShades: Set<string>;
+};
+
 export type SchemeRole = "main" | "feature" | "ceiling" | "trim";
 
 export type Scheme = {
@@ -61,11 +75,12 @@ const BUDGET_ORDER: Budget[] = ["economy", "mid", "premium"];
 
 /* ------------------------- 1. product line filter ------------------------- */
 
-export function eligibleLines(spec: CustomerSpec): ProductLine[] {
+export function eligibleLines(spec: CustomerSpec, avail?: Availability): ProductLine[] {
+  const carries = (id: string) => (avail ? avail.stockedLineIds.has(id) : dealerCarries(id));
   const category: PaintCategory = spec.surface === "exterior" ? "exterior" : "interior";
   return PRODUCT_LINES.filter((l) => {
     if (l.category !== category) return false;
-    if (!dealerCarries(l.id)) return false;
+    if (!carries(l.id)) return false;
     if (spec.brands.length && !spec.brands.includes(l.brand)) return false;
     // One band of slack either side — a customer who says "mid" will still look
     // at a premium line if the mid one is thin, but never at three bands away.
@@ -82,30 +97,32 @@ export function eligibleLines(spec: CustomerSpec): ProductLine[] {
 }
 
 /** Required prep, driven by the diagnosis rather than by upsell. */
-export function requiredPrep(spec: CustomerSpec): ProductLine[] {
+export function requiredPrep(spec: CustomerSpec, avail?: Availability): ProductLine[] {
+  const carries = (id: string) => (avail ? avail.stockedLineIds.has(id) : dealerCarries(id));
   const out: ProductLine[] = [];
   const byId = (id: string) => PRODUCT_LINES.find((p) => p.id === id);
 
   if (spec.waterproofing || spec.condition.includes("dampness")) {
     const damp = spec.surface === "exterior" ? byId("ap-smartcare-damp") : byId("ber-homeshield");
-    if (damp && dealerCarries(damp.id)) out.push(damp);
+    if (damp && carries(damp.id)) out.push(damp);
   }
   if (spec.condition.includes("fresh") || spec.condition.includes("peeling")) {
     const putty = byId("ap-putty");
-    if (putty && dealerCarries(putty.id)) out.push(putty);
+    if (putty && carries(putty.id)) out.push(putty);
   }
   const primer = spec.surface === "exterior" ? byId("ber-primer-ext") : byId("ap-primer-int");
-  if (primer && dealerCarries(primer.id)) out.push(primer);
+  if (primer && carries(primer.id)) out.push(primer);
 
   return out;
 }
 
 /* ---------------------------- 2. shade universe --------------------------- */
 
-function shadePool(spec: CustomerSpec) {
-  return AVAILABLE_SHADES.filter((s) =>
-    spec.surface === "exterior" ? s.exteriorSuitable : true,
-  );
+export function shadePool(spec: CustomerSpec, avail?: Availability) {
+  const base = avail
+    ? SHADES.filter((s) => avail.producibleShades.has(s.code))
+    : AVAILABLE_SHADES;
+  return base.filter((s) => (spec.surface === "exterior" ? s.exteriorSuitable : true));
 }
 
 const hueGap = (a: number, b: number) => {
@@ -290,16 +307,18 @@ function rationaleFor(c: Candidate, spec: CustomerSpec, line: ProductLine, photo
 
 export function recommendSchemes(
   spec: CustomerSpec,
-  opts: { photoHex?: string; limit?: number } = {},
+  opts: { photoHex?: string; limit?: number; availability?: Availability } = {},
 ): Scheme[] {
-  const lines = eligibleLines(spec);
+  const avail = opts.availability;
+  const lines = eligibleLines(spec, avail);
   if (!lines.length) return [];
 
-  const pool = shadePool(spec);
+  const pool = shadePool(spec, avail);
   const candidates = buildCandidates(pool, spec);
 
+  const carries = (id: string) => (avail ? avail.stockedLineIds.has(id) : dealerCarries(id));
   const trimLine =
-    PRODUCT_LINES.find((p) => p.category === "enamel" && dealerCarries(p.id)) ?? null;
+    PRODUCT_LINES.find((p) => p.category === "enamel" && carries(p.id)) ?? null;
 
   const scored = candidates
     .map((c) => {

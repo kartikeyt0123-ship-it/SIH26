@@ -1,5 +1,7 @@
 node_modules/
 .next/
+# PGlite data directory and uploaded customer photographs
+.data/
 out/
 build/
 .env
