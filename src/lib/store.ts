@@ -152,6 +152,8 @@ export const patchSession = (
     roomConfidence?: string;
     step?: number;
     rawText?: string;
+    customerName?: string;
+    phone?: string;
   },
 ) => call<{ session: SessionDTO }>(`/api/sessions/${token}`, {
   method: "PATCH",

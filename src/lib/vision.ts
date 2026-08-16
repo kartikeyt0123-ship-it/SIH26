@@ -236,6 +236,32 @@ export function strongestTone(room: RoomModel) {
   );
 }
 
+/**
+ * Downscale before upload.
+ *
+ * A modern phone camera produces 3–5 MB per shot. Three of those over a mobile
+ * connection is tens of seconds of waiting, and none of that resolution is used
+ * — the analysis samples at 96px and the room viewer never shows the photo at
+ * more than thumbnail size. Resizing on the device turns a 4 MB upload into
+ * roughly 200 KB, which is the difference between "instant" and "did it
+ * freeze?".
+ */
+export async function compressForUpload(file: File, max = 1400, quality = 0.78): Promise<File> {
+  // Anything already small enough goes as-is; re-encoding it would only lose
+  // quality for no bandwidth gain.
+  if (file.size < 350 * 1024) return file;
+  try {
+    const dataUrl = await fileToThumbnail(file, max, quality);
+    const blob = await (await fetch(dataUrl)).blob();
+    if (blob.size >= file.size) return file;
+    return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
+  } catch {
+    // If canvas encoding fails for any reason, send the original rather than
+    // losing the customer's photograph.
+    return file;
+  }
+}
+
 /** Downscale an uploaded file so three photographs fit comfortably in storage. */
 export function fileToThumbnail(file: File, max = 900, quality = 0.72): Promise<string> {
   return new Promise((resolve, reject) => {

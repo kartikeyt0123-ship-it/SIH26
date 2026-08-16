@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ArrowUpRight, Boxes, QrCode, TrendingUp, Users } from "lucide-react";
 import { PageHead, Panel, PanelHead, Stat, Tag, CategoryChip } from "@/components/dashboard/ui";
+import { AwaitingCount, IncomingQueue } from "@/components/dashboard/IncomingQueue";
 import {
   DEALER,
   MONTH,
@@ -33,7 +34,7 @@ const MODULES = [
     icon: Users,
     title: "Customers",
     body: "Designs customers have submitted, ready to turn into a quotation.",
-    metric: () => `${PROPOSALS.filter((p) => p.status === "new").length} awaiting quotation`,
+    metric: () => <AwaitingCount />,
   },
   {
     href: "/dashboard/qr",
@@ -66,6 +67,9 @@ export default function Overview() {
         title="Here is what needs you today."
         lede={`${DEALER.name} · ${DEALER.city} ${DEALER.pincode}`}
       />
+
+      {/* Live: appears the moment a customer submits, polls every 5s. */}
+      <IncomingQueue />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {MODULES.map((m) => {

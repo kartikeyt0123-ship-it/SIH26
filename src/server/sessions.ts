@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/db";
 import * as t from "@/db/schema";
 import { SESSION_DURATION_HOURS } from "@/lib/config";
@@ -211,13 +211,131 @@ export async function getSessionByToken(token: string) {
   return row ? hydrate(row) : undefined;
 }
 
-export async function listSessions(dealerId: string) {
+/**
+ * The dealer's whole list, in a fixed number of queries.
+ *
+ * The obvious implementation — hydrate each session in turn — costs about seven
+ * queries per session, and the dashboard polls this every five seconds. Twenty
+ * sessions became 140 round trips per poll, which is what made the console feel
+ * sluggish. This loads each table once for the whole dealer and assembles the
+ * objects in memory, so the cost is constant in the number of sessions.
+ */
+export async function listSessions(dealerId: string): Promise<SessionDTO[]> {
   const db = await getDb();
+  const now = new Date();
+
   const rows = await db.query.customerSessions.findMany({
     where: eq(t.customerSessions.dealerId, dealerId),
     orderBy: desc(t.customerSessions.createdAt),
   });
-  return Promise.all(rows.map(hydrate));
+  if (!rows.length) return [];
+
+  const projects = await db.query.projects.findMany({
+    where: eq(t.projects.dealerId, dealerId),
+  });
+  const projectIds = projects.map((p) => p.id);
+
+  const [reqs, vizzes, images, designs, quotes] = projectIds.length
+    ? await Promise.all([
+        db.query.requirements.findMany({ where: inArray(t.requirements.projectId, projectIds) }),
+        db.query.visualizations.findMany({ where: inArray(t.visualizations.projectId, projectIds) }),
+        db.query.projectImages.findMany({
+          where: inArray(t.projectImages.projectId, projectIds),
+          orderBy: t.projectImages.position,
+        }),
+        db.query.savedDesigns.findMany({ where: inArray(t.savedDesigns.projectId, projectIds) }),
+        db.query.quotations.findMany({ where: inArray(t.quotations.projectId, projectIds) }),
+      ])
+    : [[], [], [], [], []];
+
+  const group = <T extends { projectId: string }>(list: T[]) => {
+    const m = new Map<string, T[]>();
+    for (const item of list) {
+      const arr = m.get(item.projectId);
+      if (arr) arr.push(item);
+      else m.set(item.projectId, [item]);
+    }
+    return m;
+  };
+
+  const byProjectReq = group(reqs);
+  const byProjectViz = group(vizzes);
+  const byProjectImg = group(images);
+  const byProjectDesign = group(designs);
+  const byProjectQuote = group(quotes);
+  const projectBySession = new Map(projects.map((p) => [p.sessionId, p]));
+
+  // Sessions that ran out are marked once, in a single statement, rather than
+  // one UPDATE per stale row inside the loop.
+  const newlyExpired = rows
+    .filter((r) => now > r.expiresAt && r.status !== "EXPIRED" && r.status !== "SUBMITTED")
+    .map((r) => r.id);
+  if (newlyExpired.length) {
+    await db
+      .update(t.customerSessions)
+      .set({ status: "EXPIRED" })
+      .where(inArray(t.customerSessions.id, newlyExpired));
+  }
+
+  return rows.map((row) => {
+    const expired = now > row.expiresAt && row.status !== "SUBMITTED";
+    const project = projectBySession.get(row.id);
+    const req = project ? byProjectReq.get(project.id)?.[0] : undefined;
+    const viz = project ? byProjectViz.get(project.id)?.slice(-1)[0] : undefined;
+    const quote = project ? byProjectQuote.get(project.id)?.slice(-1)[0] : undefined;
+    const spec = (req?.parsedSpec ?? null) as Record<string, unknown> | null;
+
+    return {
+      id: row.id,
+      token: row.token,
+      dealerId: row.dealerId,
+      customerName: row.customerName,
+      phone: row.phone,
+      status: expired ? "EXPIRED" : row.status,
+      opens: row.opens,
+      createdAt: row.createdAt.toISOString(),
+      expiresAt: row.expiresAt.toISOString(),
+      hoursLeft: Math.max(0, hoursBetween(row.expiresAt, now)),
+      expired,
+      project: project
+        ? {
+            id: project.id,
+            status: project.status,
+            step: project.step,
+            spec,
+            measurements: (req?.measurements ?? null) as Record<string, unknown> | null,
+            room: (viz?.roomModel ?? null) as Record<string, unknown> | null,
+            roomEngine: viz?.engine ?? null,
+            roomConfidence: viz?.confidence ?? null,
+            images: (byProjectImg.get(project.id) ?? []).map((i) => ({
+              id: i.id,
+              url: `/api/images/${i.id}`,
+              position: i.position,
+            })),
+            savedDesigns: (byProjectDesign.get(project.id) ?? []).map((d) => ({
+              id: d.id,
+              schemeId: d.schemeId,
+              label: d.label,
+              scheme: d.scheme,
+              isChosen: d.isChosen,
+            })),
+            quotation: quote
+              ? {
+                  id: quote.id,
+                  lines: quote.lines,
+                  areas: quote.areas,
+                  subtotal: quote.subtotal,
+                  discountPct: quote.discountPct,
+                  total: quote.total,
+                  status: quote.status,
+                }
+              : null,
+            submittedAt: project.submittedAt?.toISOString() ?? null,
+            customerNote: (spec?.customerNote as string) ?? null,
+          }
+        : null,
+    };
+  });
 }
 
 /** Called when the customer opens the link. */
@@ -303,6 +421,36 @@ export async function saveRequirements(
     .where(eq(t.projects.id, ctx.projectId));
 
   return { ok: true as const, projectId: ctx.projectId };
+}
+
+/**
+ * The customer confirms who they are.
+ *
+ * A dealer often issues a code before asking a name — "scan this while I finish
+ * with him" — so the session starts as "Walk-in customer". Letting the customer
+ * fill it in on the review screen is the difference between a design the dealer
+ * can follow up and one he cannot.
+ */
+export async function updateContact(
+  token: string,
+  input: { customerName?: string; phone?: string },
+) {
+  const ctx = await writableProject(token);
+  if (!ctx.ok) return ctx;
+  const db = await getDb();
+
+  const patch: Partial<typeof t.customerSessions.$inferInsert> = {};
+  const name = input.customerName?.trim();
+  const phone = input.phone?.trim();
+  if (name) patch.customerName = name;
+  if (phone) patch.phone = phone;
+  if (!Object.keys(patch).length) return { ok: true as const };
+
+  await db
+    .update(t.customerSessions)
+    .set(patch)
+    .where(eq(t.customerSessions.id, ctx.session.id));
+  return { ok: true as const };
 }
 
 export async function setStep(token: string, step: number) {

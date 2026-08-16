@@ -6,6 +6,7 @@ import {
   saveVisualization,
   setStep,
   touchSession,
+  updateContact,
 } from "@/server/sessions";
 
 export const runtime = "nodejs";
@@ -58,6 +59,13 @@ export async function PATCH(req: Request, { params }: Ctx) {
       body.roomEngine ?? "heuristic-v1",
       body.roomConfidence ?? "low",
     );
+    if (!r.ok) return fail(r.error);
+  }
+  if (body.customerName || body.phone) {
+    const r = await updateContact(token, {
+      customerName: body.customerName ? String(body.customerName) : undefined,
+      phone: body.phone ? String(body.phone) : undefined,
+    });
     if (!r.ok) return fail(r.error);
   }
   if (typeof body.step === "number") {

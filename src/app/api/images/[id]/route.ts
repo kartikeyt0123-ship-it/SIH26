@@ -20,7 +20,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   return new Response(new Uint8Array(img.data), {
     headers: {
       "Content-Type": img.mimeType,
-      "Cache-Control": "private, max-age=3600",
+      // The id is a UUID and the bytes behind it never change, so the browser
+      // can keep it forever. Without this the dealer's queue re-downloads every
+      // customer photograph on each poll.
+      "Cache-Control": "private, max-age=31536000, immutable",
       "Content-Length": String(img.data.byteLength),
     },
   });

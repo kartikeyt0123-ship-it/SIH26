@@ -33,7 +33,7 @@ import {
   useCustomerSession,
   type DealerCatalogue,
 } from "@/lib/store";
-import { analyzeRoomPhotos, strongestTone, type RoomModel } from "@/lib/vision";
+import { analyzeRoomPhotos, compressForUpload, strongestTone, type RoomModel } from "@/lib/vision";
 import { cn, inr } from "@/lib/utils";
 
 // three.js only loads once there is a room to show — a customer on a counter
@@ -89,6 +89,11 @@ export function CustomerApp({ code }: { code: string }) {
   const [overrides, setOverrides] = useState<Partial<Record<Roles, Shade>>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState("");
+  // The dealer may have issued the code before asking a name. The customer
+  // confirms who they are on the review screen, so the queue never shows a
+  // design from "Walk-in customer" with no way to call them back.
+  const [contactName, setContactName] = useState("");
+  const [contactPhone, setContactPhone] = useState("");
   const [error, setError] = useState<string | null>(null);
   const hydrated = useRef(false);
 
@@ -105,6 +110,10 @@ export function CustomerApp({ code }: { code: string }) {
     if (p?.spec) setSpec({ ...DEFAULT_SPEC, ...(p.spec as unknown as CustomerSpec) });
     if (p?.measurements) setMeasure({ ...DEFAULT_MEASURE, ...(p.measurements as unknown as Measurements) });
     if (p?.room) setRoom(p.room as unknown as RoomModel);
+    if (session.customerName && session.customerName !== "Walk-in customer") {
+      setContactName(session.customerName);
+    }
+    if (session.phone) setContactPhone(session.phone);
     if (session.status === "SUBMITTED") setStep(7);
     else if (p?.step) setStep(Math.min(p.step, 6));
   }, [state, session]);
@@ -234,7 +243,10 @@ export function CustomerApp({ code }: { code: string }) {
     setBusy("upload");
     setError(null);
     try {
-      const r = await uploadImages(code, Array.from(files));
+      // Resize on the phone first — see compressForUpload. Sending raw camera
+      // files over a mobile connection is what made this feel broken.
+      const prepared = await Promise.all(Array.from(files).map((f) => compressForUpload(f)));
+      const r = await uploadImages(code, prepared);
       apply(r.session);
       if (r.rejected.length) setError(r.rejected.map((x) => x.reason).join(" "));
     } catch (e) {
@@ -293,7 +305,23 @@ export function CustomerApp({ code }: { code: string }) {
   const submit = async () => {
     setBusy("submit");
     try {
-      await patchSession(code, { spec, measurements: measure });
+      // If the customer never tapped "save", the combination they are looking
+      // at is still their answer — persist it before submitting. Without this
+      // the dealer receives a submission with no design attached, which is the
+      // one outcome this whole flow exists to prevent.
+      if (!chosen && currentSelection) {
+        await saveDesign(code, {
+          schemeId: currentSelection.id,
+          label: currentSelection.title,
+          scheme: currentSelection,
+        });
+      }
+      await patchSession(code, {
+        spec,
+        measurements: measure,
+        customerName: contactName.trim() || undefined,
+        phone: contactPhone.trim() || undefined,
+      });
       const r = await submitSession(code, note.trim() || undefined);
       apply(r.session);
       setStep(7);
@@ -427,6 +455,10 @@ export function CustomerApp({ code }: { code: string }) {
             quote={quote}
             note={note}
             setNote={setNote}
+            contactName={contactName}
+            setContactName={setContactName}
+            contactPhone={contactPhone}
+            setContactPhone={setContactPhone}
             busy={busy === "submit"}
             onBack={() => goto(5)}
             onSubmit={submit}
@@ -1171,6 +1203,10 @@ function ReviewStep({
   quote,
   note,
   setNote,
+  contactName,
+  setContactName,
+  contactPhone,
+  setContactPhone,
   busy,
   onBack,
   onSubmit,
@@ -1182,6 +1218,10 @@ function ReviewStep({
   quote: ReturnType<typeof buildQuote> | null;
   note: string;
   setNote: (s: string) => void;
+  contactName: string;
+  setContactName: (s: string) => void;
+  contactPhone: string;
+  setContactPhone: (s: string) => void;
   busy: boolean;
   onBack: () => void;
   onSubmit: () => void;
@@ -1259,7 +1299,26 @@ function ReviewStep({
         </div>
       )}
 
-      <label className="mt-5 block">
+      <div className="mt-5 rounded-2xl border border-[color-mix(in_oklab,var(--color-paper-200)_12%,transparent)] p-4">
+        <span className="eyebrow">Who should the dealer call?</span>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <input
+            value={contactName}
+            onChange={(e) => setContactName(e.target.value)}
+            placeholder="Your name"
+            className="w-full rounded-xl border border-[color-mix(in_oklab,var(--color-paper-200)_16%,transparent)] bg-transparent px-3 py-3 text-[0.9375rem] text-paper-50 outline-none placeholder:text-paper-400 focus:border-[color-mix(in_oklab,var(--color-pigment)_60%,transparent)]"
+          />
+          <input
+            value={contactPhone}
+            onChange={(e) => setContactPhone(e.target.value)}
+            inputMode="tel"
+            placeholder="Mobile number"
+            className="data w-full rounded-xl border border-[color-mix(in_oklab,var(--color-paper-200)_16%,transparent)] bg-transparent px-3 py-3 text-[0.9375rem] text-paper-50 outline-none placeholder:text-paper-400 focus:border-[color-mix(in_oklab,var(--color-pigment)_60%,transparent)]"
+          />
+        </div>
+      </div>
+
+      <label className="mt-4 block">
         <span className="eyebrow">Anything else for the dealer?</span>
         <textarea
           value={note}

@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { CloudRain, Sparkles, MapPin } from "lucide-react";
 import { Bar, CategoryChip, PageHead, Panel, PanelHead, Stat, Tag } from "@/components/dashboard/ui";
+import { TallyImport } from "@/components/dashboard/TallyImport";
 import {
   MATERIAL_TYPES,
   SIGNALS,
@@ -62,6 +63,9 @@ export default function InventoryPage() {
         <Panel><Stat label="Blocking shortages" value="1" note="yellow oxide colorant" tone="down" /></Panel>
         <Panel><Stat label="Overstocked" value={String(STOCK.filter((s) => stockStatus(s) === "overstocked").length)} note="capital sitting still" /></Panel>
       </div>
+
+      {/* ---------------- Tally import ---------------- */}
+      <TallyImport onDone={() => window.location.reload()} />
 
       {/* ---------------- boost suggestions ---------------- */}
       <Panel className="mt-4">
