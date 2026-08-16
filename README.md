@@ -24,21 +24,30 @@ a fragmented workflow.
 
 ## 1. Status of this repository
 
-**This repo currently contains the UI/UX layer only** — the landing experience,
-the dealer login, the dealer console, the design system and the motion system.
-Every screen runs on the demo dataset in `src/lib/demo.ts`.
+**The full customer → dealer loop works end to end, in the browser.** A dealer
+issues a code, the customer opens it on their phone, answers the questions,
+photographs the room, gets it rebuilt in 3D, picks a combination drawn from the
+dealer's own stock, enters the size, and sends it back — and the priced
+quotation appears in the dealer's queue.
 
-There is no backend, no database, no auth and no AI integration yet. Numbers
-shown anywhere in the UI are synthetic and labelled as such.
+**What is real:** the ΔE2000 colour engine, the recommendation engine, the
+availability filter, the photo analysis, the area and quantity arithmetic, the
+session lifecycle. All of it computes.
 
-| Built | Not built yet |
+**What is not:** there is no server. Sessions live in `localStorage`, so the
+dealer console and the customer app must be open in the same browser (different
+tabs is fine — they sync live). Sign-in is a stub. And see §5a: the vision step
+is an in-browser heuristic, not a hosted model.
+
+| Built and computing | Still stubbed |
 | --- | --- |
-| Design language + tokens | Postgres schema / Drizzle migrations |
-| Landing experience: scroll-driven 3D room | Express API layer |
-| Dealer login (colour-centric) | Supabase auth (the OTP flow is a stub) |
-| Dealer console: overview, inventory, customers, links, performance | Real QR token issuance |
-| Demo dataset with the shape the real schema needs | LLM requirement parsing, vision diagnosis |
-| Brand mark, wordmark, favicon | ΔE2000 colour engine, availability engine |
+| CIEDE2000 colour engine (`color.ts`) | Postgres / Drizzle — store is `localStorage` |
+| Recommendation engine with availability filter (`recommend.ts`) | Express API layer |
+| Photo → room reconstruction (`vision.ts`) | Hosted vision model (heuristic stands in) |
+| Area → litres → packs → price (`quote.ts`) | LLM requirement parsing (questions are structured) |
+| Session lifecycle, 3-day expiry, unique codes (`store.ts`) | Supabase auth (any code signs in) |
+| Realistic catalogue + dealer stock overlay (`catalog.ts`) | Scannable QR symbol (preview block stands in) |
+| The whole customer app and dealer console | Tally/ERP import |
 
 ### Routes
 
@@ -48,9 +57,11 @@ shown anywhere in the UI are synthetic and labelled as such.
 | `/login` | Dealer sign-in; any number and any code open the console |
 | `/dashboard` | Overview — what needs the dealer today, plus the four module tiles |
 | `/dashboard/inventory` | Stock by category and brand, boost suggestions, weather/trend signals |
-| `/dashboard/customers` | Submitted designs → quotation generation |
+| `/dashboard/customers` | The queue — submitted designs → priced quotation |
 | `/dashboard/qr` | Issue a unique customer link, 48–72 h validity |
 | `/dashboard/performance` | Recent deals, revenue by week, best sellers |
+| `/c` | Customer code entry (for a code written on a slip) |
+| `/c/[code]` | **The customer app** — questions → photos → 3D room → colours → size → send |
 
 ---
 
@@ -192,6 +203,81 @@ Implementation notes:
 
 ---
 
+## 4a. The working loop
+
+```
+DEALER  /dashboard/qr
+   issues a code  ──────────────►  unique 5-char code, 48–72 h expiry
+                                   (no O/0, no I/1 — it gets read aloud)
+                                          │
+CUSTOMER  /c/CODE                         ▼
+   1  Questions      interior/exterior · damp · budget · brand · mood · finish · room
+   2  Photos         2–3 pictures, downscaled on the phone, stored with the session
+   3  Room           k-means palette, floor line, window side, light temperature
+                     → parametric 3D room they can orbit
+   4  Colours        5 combinations from the DEALER'S OWN STOCK, each with a reason
+                     and a ΔE against the tone already in their photographs;
+                     any surface overridable from the producible-shade grid
+   5  Size           customer-entered dimensions → area → litres → packs → price
+   6  Send           status: submitted
+                                          │
+DEALER  /dashboard/customers               ▼
+   the design is in the queue, with photos, measurements, the scheme and the
+   recomputed quotation. Discount, then send. status: quoted
+```
+
+The customer can close the tab and come back to the same code for three days;
+everything they did is rehydrated. Both sides listen on the same store, so a
+design submitted in one tab appears in the dealer's queue in another without a
+reload.
+
+### The recommendation engine
+
+Hard filters first, colour theory second, ranking last — **never an LLM picking
+a product.**
+
+1. **Product lines** — category must match the surface, the dealer must carry
+   the line, brand preference respected, budget within one band. Ask for Dulux
+   at this dealer and the engine returns nothing rather than substituting.
+2. **Shades** — only what the dealer can produce today; exterior schemes drop
+   interior-only shades.
+3. **Combinations** — every wall-safe light shade paired against every
+   sufficiently darker shade, classified by hue distance into analogous,
+   complementary, tonal or neutral-accent. Pairs under 18 points of lightness
+   separation are discarded: below that a feature wall reads as a patch job.
+4. **Scoring** — separation, wall lightness (weighted lightly, or every answer
+   collapses to white), approach fit against the customer's mood, and proximity
+   to the strongest tone already in their photographs.
+5. **Output** — five schemes, deduplicated by both wall and feature shade, each
+   with ceiling and trim derived (ceiling always lighter than the walls and
+   never the same shade; trim dark and never the same shade as the feature).
+
+Each scheme carries a plain-language rationale, because a recommendation a
+dealer cannot explain to a customer is a recommendation he will not make.
+
+## 5a. About the "AI"
+
+Stated plainly, because it matters: **no trained or hosted model runs in this
+repo.** There are no API keys and no server to hold them.
+
+What actually runs:
+
+| Step | What does the work | What a real model would add |
+| --- | --- | --- |
+| Understanding the requirement | Structured questions | Free text and voice, Hindi or English, parsed to the same `CustomerSpec` |
+| Reading the photographs | k-means in Lab + gradient analysis, in-browser (`vision.ts`) | Wall/floor segmentation, depth, defect classification with confidences |
+| Rebuilding the room | Parametric geometry from the inferred proportions | True geometry from multi-view reconstruction |
+| Choosing colours | Colour theory + inventory constraints (`recommend.ts`) | Ranking tuned on what actually converted, per region |
+
+`analyzeRoomPhotos(sources) → RoomModel` is the **only** entry point, and
+`RoomModel` is the only thing the rest of the app consumes. Swapping the
+heuristic for a hosted vision call is a change to that one function; every
+screen keeps working. The same is true of `recommendSchemes`.
+
+The customer-facing copy never claims more than this: the 3D room is labelled a
+reconstruction, its confidence is shown, and quantities come from measurements
+the customer types in — never from the photographs.
+
 ## 5. Motion system
 
 Defined once in `src/lib/motion.ts` and `globals.css`, referenced everywhere.
@@ -264,6 +350,10 @@ src/
 │  ├─ globals.css         design tokens, type primitives, reveal choreography
 │  ├─ icon.svg            favicon (the mark)
 │  ├─ login/page.tsx      colour-centric dealer sign-in
+│  ├─ c/
+│  │  ├─ page.tsx         customer code entry
+│  │  └─ [code]/
+│  │     └─ CustomerApp.tsx   the six-step customer journey
 │  └─ dashboard/
 │     ├─ layout.tsx       console shell
 │     ├─ page.tsx         overview — triage + four module tiles
@@ -272,7 +362,13 @@ src/
 │     ├─ qr/              issue customer links
 │     └─ performance/     deals, revenue, best sellers
 ├─ lib/
-│  ├─ demo.ts             the entire demo dataset + the derived metrics
+│  ├─ color.ts            CIELAB, CIEDE2000, HSL, luminance — the only metric
+│  ├─ catalog.ts          shared catalogue + this dealer's stock overlay
+│  ├─ recommend.ts        the recommendation engine
+│  ├─ vision.ts           photo → RoomModel (heuristic; see §5a)
+│  ├─ quote.ts            areas → litres → packs → price, with the arithmetic
+│  ├─ store.ts            session lifecycle; the only place persistence lives
+│  ├─ demo.ts             console demo dataset + derived metrics
 │  ├─ story.ts            shared scroll timeline (out-of-React hot path)
 │  ├─ motion.ts           easing / duration / stagger tokens
 │  └─ utils.ts            cn, clamp, mapRange, damp, INR formatting
@@ -283,7 +379,8 @@ src/
 │  │  └─ Reveal.tsx       Reveal, RevealLines (masked headline lines)
 │  ├─ three/
 │  │  ├─ StageCanvas.tsx  the single canvas + performance contract
-│  │  ├─ Composition.tsx  the six-beat room
+│  │  ├─ Composition.tsx  the six-beat room (landing)
+│  │  ├─ RoomViewer.tsx   the customer's reconstructed room (lazy-loaded)
 │  │  ├─ textures.ts      procedural tile / wallpaper / timber / stone / paint
 │  │  └─ geometry.ts      procedural rounded slab, hash, smoothstep
 │  ├─ dashboard/
@@ -400,6 +497,17 @@ Node 20+. No environment variables are required for the UI layer.
 
 Sign-in is a stub: **any mobile number and any six-digit code open the console.**
 `/dashboard` is also reachable directly without signing in.
+
+### Walking the whole loop
+
+1. Open `/dashboard/qr`, type a customer name, click **Issue link**.
+2. Click **Open** — that is the customer's phone view. Answer the questions,
+   upload a photo or two of any room, and go through to **Send to my dealer**.
+3. Go back to `/dashboard/customers`. The design is at the top of the queue with
+   the photos, the measurements, the scheme and a fully worked quotation.
+
+Sessions are held in `localStorage` under `rachna.sessions.v2`, so use the same
+browser for both sides. Clearing site data resets everything to the seed.
 
 ---
 
