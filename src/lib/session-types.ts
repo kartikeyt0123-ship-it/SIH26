@@ -43,7 +43,28 @@ export type SessionStatus =
   | "EXPIRED"
   | "CLOSED";
 
-export type ProjectDTO = {
+/**
+ * Round 2 additions to the project payload.
+ *
+ * All four are nullable and all four default to null, which is what keeps every
+ * Round 1 screen working unchanged: a project created before this existed, or
+ * one whose customer never opened an intelligence panel, is simply a project
+ * with nulls here. Nothing downstream is allowed to require them.
+ */
+export type ProjectIntelligence = {
+  /** SurfaceReport — see lib/surface.ts. */
+  surface: Record<string, unknown> | null;
+  /** DesignDNA — see lib/dna.ts. Derived, and re-derivable from `signals`. */
+  dna: Record<string, unknown> | null;
+  /** How many What-If directions the customer explored. */
+  variationCount: number;
+  /** The last intent they asked for, for the dealer's context. */
+  lastIntent: string | null;
+  /** ClimateContext the recommendation was made under. */
+  climate: Record<string, unknown> | null;
+};
+
+export type ProjectDTO = ProjectIntelligence & {
   id: string;
   status: string;
   step: number;

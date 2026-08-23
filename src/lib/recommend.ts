@@ -29,6 +29,18 @@ import {
 } from "./catalog";
 import { deltaEHex, hexToHsl, hexToLab, isLight } from "./color";
 
+/**
+ * What the customer says about where the building is.
+ *
+ * Asked in their own words rather than derived from the dealer's city, because
+ * the two are often different — a dealer in Kanpur sells to a site an hour
+ * away, and a coastal wall behaves nothing like an inland one whatever the
+ * shop's postcode says. It is a coarse bucket on purpose: a customer can answer
+ * "we get heavy rain" reliably, and cannot answer "what is your annual
+ * precipitation" at all.
+ */
+export type ClimateZone = "hot" | "rainy" | "coastal" | "cold" | "moderate";
+
 export type CustomerSpec = {
   surface: "interior" | "exterior";
   /** The wall already shows damp, or the customer asked for waterproofing. */
@@ -40,6 +52,10 @@ export type CustomerSpec = {
   mood: "warm" | "cool" | "neutral" | "bold" | "any";
   roomType: string;
   condition: string[];
+  /** Undefined on projects created before this was asked. Never assumed. */
+  climateZone?: ClimateZone;
+  /** Prep product ids the customer explicitly accepted from the surface report. */
+  prepAccepted?: string[];
 };
 
 /**
@@ -96,8 +112,69 @@ export function eligibleLines(spec: CustomerSpec, avail?: Availability): Product
   });
 }
 
+/**
+ * The prep the customer was offered, and whether each one was prescribed.
+ *
+ * `required` means the diagnosis called for it — damp was seen, the film is
+ * peeling — as opposed to primer, which is simply how paint is applied. The
+ * distinction matters because the customer is allowed to decline, and a dealer
+ * looking at the quotation afterwards needs to see which omissions were
+ * choices rather than oversights.
+ */
+export type PrepOption = {
+  line: ProductLine;
+  required: boolean;
+  why: string;
+};
+
+export function prepOptions(spec: CustomerSpec, avail?: Availability): PrepOption[] {
+  // Always from the diagnosis, never from `requiredPrep` — that now honours the
+  // customer's own answer, so asking it here would make a step "not required"
+  // simply because the customer had unticked it, and the reason for ticking it
+  // would disappear the moment they did.
+  const prescribed = new Set(diagnosedPrep(spec, avail).map((p) => p.id));
+  const carries = (id: string) => (avail ? avail.stockedLineIds.has(id) : dealerCarries(id));
+  const byId = (id: string) => PRODUCT_LINES.find((p) => p.id === id);
+
+  const out: PrepOption[] = [];
+  const push = (line: ProductLine | undefined, why: string) => {
+    if (!line || !carries(line.id) || out.some((o) => o.line.id === line.id)) return;
+    out.push({ line, required: prescribed.has(line.id), why });
+  };
+
+  if (spec.waterproofing || spec.condition.includes("dampness")) {
+    push(
+      byId(spec.surface === "exterior" ? "ap-smartcare-damp" : "ber-homeshield"),
+      "Your photographs suggested damp. Paint over untreated moisture and it comes back through, usually within one season.",
+    );
+  }
+  push(
+    byId("ap-putty"),
+    spec.condition.some((c) => ["peeling", "cracks", "uneven", "stains"].includes(c))
+      ? "Levels the shading and fills the fine lines the analysis picked up, so the finish reads flat."
+      : "Two thin coats give the paint an even surface to sit on.",
+  );
+  push(
+    byId(spec.surface === "exterior" ? "ber-primer-ext" : "ap-primer-int"),
+    "Primer is what the topcoat holds on to. Skipping it is the commonest reason a repaint fails early.",
+  );
+
+  return out;
+}
+
 /** Required prep, driven by the diagnosis rather than by upsell. */
 export function requiredPrep(spec: CustomerSpec, avail?: Availability): ProductLine[] {
+  // An explicit answer from the customer wins. `prepAccepted` is undefined
+  // until the surface report is shown, so every existing project keeps the
+  // diagnosis-driven behaviour unchanged.
+  if (spec.prepAccepted) {
+    const chosen = new Set(spec.prepAccepted);
+    return PRODUCT_LINES.filter((p) => chosen.has(p.id));
+  }
+  return diagnosedPrep(spec, avail);
+}
+
+function diagnosedPrep(spec: CustomerSpec, avail?: Availability): ProductLine[] {
   const carries = (id: string) => (avail ? avail.stockedLineIds.has(id) : dealerCarries(id));
   const out: ProductLine[] = [];
   const byId = (id: string) => PRODUCT_LINES.find((p) => p.id === id);
@@ -208,6 +285,40 @@ function scoreCandidate(c: Candidate, spec: CustomerSpec, photoHex?: string) {
   if (spec.mood === "bold") score += fs * 0.35;
   if (spec.mood === "neutral") score -= fs * 0.3;
 
+  /**
+   * Where the building is.
+   *
+   * These bias ranking rather than eligibility, with one deliberate exception
+   * handled in `shadePool`: a shade that is not rated for exteriors is removed
+   * outright on an exterior wall, in every zone. Everything below is a
+   * preference, not a rule, because a customer who wants a deep colour on a hot
+   * wall is allowed to have one — they should simply see the calmer options first.
+   */
+  switch (spec.climateZone) {
+    case "hot":
+      // Strong sun bleaches deep pigment and a dark wall runs hotter. Both
+      // argue for a lighter body colour on anything facing the weather.
+      if (spec.surface === "exterior") {
+        score += (mL - 62) * 0.5;
+        score -= Math.max(0, 55 - fL) * 0.25;
+      }
+      break;
+    case "rainy":
+    case "coastal":
+      // Wet walls stain and grow algae from the bottom up, and it shows most on
+      // a pale wall. A mid-depth main reads clean far longer.
+      score += mL > 88 ? -14 : 8;
+      if (spec.surface === "exterior") score += fs * 0.1;
+      break;
+    case "cold":
+      // Low winter light drains cool greys; warmth is doing real work here
+      // rather than being a taste preference.
+      if (mainHue.s > 6 && (mainHue.h < 70 || mainHue.h > 330)) score += 10;
+      break;
+    default:
+      break;
+  }
+
   // Fit to what is already in the room, if we have photos.
   let photoDelta: number | undefined;
   if (photoHex) {
@@ -277,6 +388,36 @@ function titleFor(c: Candidate, spec: CustomerSpec) {
   }
 }
 
+/**
+ * The sentence attached when a climate zone shaped the ranking.
+ *
+ * Interior entries are mostly absent on purpose: an inside wall in a hot
+ * district is still an inside wall, and inventing an environmental
+ * justification for it would be noise dressed as intelligence.
+ */
+const ZONE_REASON: Partial<
+  Record<ClimateZone, Partial<Record<"interior" | "exterior", string>>>
+> = {
+  hot: {
+    exterior:
+      "Ranked for a hot, high-sun location: lighter body colours hold their depth for years longer on a wall that takes direct afternoon sun.",
+  },
+  rainy: {
+    exterior:
+      "Ranked for heavy rainfall: a mid-depth wall hides the staining and algae that a very pale exterior shows within one monsoon.",
+    interior:
+      "Chosen with damp in mind — in a high-rainfall area an inside wall still has to cope with the humidity behind it.",
+  },
+  coastal: {
+    exterior:
+      "Ranked for a coastal wall, where salt air and constant humidity mark a pale finish fastest.",
+  },
+  cold: {
+    interior:
+      "Weighted warm for a cold-climate room, where low winter light drains cooler greys and makes a space read colder than it is.",
+  },
+};
+
 function rationaleFor(c: Candidate, spec: CustomerSpec, line: ProductLine, photoDelta?: number) {
   const bits: string[] = [];
   const sep = Math.round(hexToLab(c.main.hex).L - hexToLab(c.feature.hex).L);
@@ -301,6 +442,12 @@ function rationaleFor(c: Candidate, spec: CustomerSpec, line: ProductLine, photo
   if (photoDelta !== undefined && photoDelta < 22) {
     bits.push(`It also stays close to the tone already in your photographs, so the room will still feel like yours.`);
   }
+
+  // Say the environmental reason out loud. A recommendation that quietly
+  // reorders itself for the weather is indistinguishable from one that ignored
+  // it, and the customer cannot disagree with reasoning they were never shown.
+  const zoneNote = ZONE_REASON[spec.climateZone ?? "moderate"]?.[spec.surface];
+  if (zoneNote) bits.push(zoneNote);
   bits.push(`${line.brand} ${line.name} — ${line.blurb}`);
   return bits.join(" ");
 }

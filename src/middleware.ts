@@ -1,70 +1,65 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { COOKIE, readCookie } from "@/lib/dealer-cookie";
 
 /**
- * Dealer-side password gate.
+ * Dealer-side gate.
  *
- * The dealer console is the whole shop: every customer's photographs, phone
- * number, design and quotation. Once the app has a permanent public URL, a
- * shared link would hand all of that to anyone who received it, so the console
- * sits behind HTTP Basic auth.
+ * Replaces the shared HTTP Basic password. One secret shared by every dealer
+ * was defensible while there was exactly one shop; with accounts it is not,
+ * because it grants whoever holds it access to every dealer's customers,
+ * photographs and quotations at once. The cookie names a specific tenant and
+ * is signed, so it cannot be edited into someone else's shop.
  *
- * What is deliberately NOT gated: `/c/*` and the session APIs under
- * `/api/sessions/<token>/*`. Those are the customer's own journey, and the
- * unguessable token is their credential. Putting a password in front of them
- * would break the QR the moment a customer scanned it.
+ * The signature is verified HERE, not merely checked for presence — that is why
+ * the HMAC is built on Web Crypto (see lib/dealer-cookie.ts). A presence check
+ * would let any arbitrary cookie value render the console shell.
  *
- * This is a shared password, not real authentication. It stops a link being
- * passed around; it is not a substitute for per-dealer accounts, which is what
- * a pilot with more than one shop needs.
+ * What is deliberately NOT gated: `/c/*` and `/api/sessions/<token>/*`. Those
+ * are the customer's own journey and the unguessable token is their credential.
+ * Putting a dealer login in front of them would break the QR the instant a
+ * customer scanned it — which is the entire product.
  */
 
-const PROTECTED = [
-  "/dashboard",
-  "/api/inventory",
-  "/api/quotations",
-];
+const DEALER_PATHS = ["/dashboard", "/api/inventory", "/api/quotations", "/api/intelligence"];
 
-function isProtected(pathname: string) {
-  if (PROTECTED.some((p) => pathname === p || pathname.startsWith(p + "/"))) return true;
-  // The dealer's own session endpoints: listing every customer and issuing new
-  // codes. `/api/sessions/<token>` and below belong to the customer and stay open.
+function needsDealer(pathname: string) {
+  if (DEALER_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"))) return true;
+  // Listing every customer and issuing new codes is a dealer action.
+  // `/api/sessions/<token>` and below belong to the customer and stay open.
   if (pathname === "/api/sessions") return true;
   return false;
 }
 
-export function middleware(req: NextRequest) {
-  const password = process.env.DEALER_PASSWORD?.trim();
+export async function middleware(req: NextRequest) {
+  const { pathname } = req.nextUrl;
+  if (!needsDealer(pathname)) return NextResponse.next();
 
-  // No password configured: local development stays frictionless. The deploy
-  // checklist sets this, and the dashboard warns when it is missing.
-  if (!password) return NextResponse.next();
-  if (!isProtected(req.nextUrl.pathname)) return NextResponse.next();
+  const dealerId = await readCookie(req.cookies.get(COOKIE)?.value);
+  if (dealerId) return NextResponse.next();
 
-  const header = req.headers.get("authorization") ?? "";
-  if (header.startsWith("Basic ")) {
-    try {
-      const decoded = atob(header.slice(6));
-      const supplied = decoded.slice(decoded.indexOf(":") + 1);
-      // Constant-time-ish compare: length first, then a full scan that does not
-      // short-circuit on the first differing character.
-      if (supplied.length === password.length) {
-        let diff = 0;
-        for (let i = 0; i < password.length; i++) {
-          diff |= supplied.charCodeAt(i) ^ password.charCodeAt(i);
-        }
-        if (diff === 0) return NextResponse.next();
-      }
-    } catch {
-      /* malformed header falls through to the challenge */
-    }
+  // An API call gets JSON it can act on; a page gets sent to the sign-in screen
+  // with a return path, so signing in lands the dealer where they were going
+  // rather than dumping them on the overview.
+  if (pathname.startsWith("/api/")) {
+    return NextResponse.json(
+      { error: "unauthorised", message: "Sign in to continue." },
+      { status: 401 },
+    );
   }
 
-  return new NextResponse("Authentication required", {
-    status: 401,
-    headers: { "WWW-Authenticate": 'Basic realm="Rachna AI dealer console", charset="UTF-8"' },
-  });
+  const url = req.nextUrl.clone();
+  url.pathname = "/login";
+  url.search = `?next=${encodeURIComponent(pathname)}`;
+  return NextResponse.redirect(url);
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/api/sessions", "/api/inventory/:path*", "/api/quotations"],
+  matcher: [
+    "/dashboard/:path*",
+    "/api/sessions",
+    "/api/inventory/:path*",
+    "/api/quotations",
+    "/api/quotations/:path*",
+    "/api/intelligence",
+  ],
 };

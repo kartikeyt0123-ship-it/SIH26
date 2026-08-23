@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:reset": "node -e \"require('fs').rmSync('.data',{recursive:true,force:true});console.log('database and uploads cleared')\"",
-    "tunnel": "cloudflared tunnel --url http://localhost:3000"
+    "tunnel": "node scripts/tunnel.mjs",
+    "test:surface": "tsx scripts/surface-check.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.5",

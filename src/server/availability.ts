@@ -67,7 +67,20 @@ export async function dealerCatalogue(dealerId: string) {
     ).values(),
   );
 
-  const shades = await db
+  /**
+   * Every catalogue shade, each carrying whether this dealer can mix it.
+   *
+   * Previously this returned only producible shades, which made unavailable
+   * colours invisible rather than unavailable. Invisible is the wrong answer:
+   * a customer who wants a colour they cannot see simply leaves, and the dealer
+   * never learns the colour existed. Returning the whole set with a flag lets
+   * the app show the swatch, refuse to put it on a wall, offer the nearest
+   * thing that can be mixed, and capture the request.
+   *
+   * The recommender is unaffected — it filters on `dealerAvailability`, not on
+   * this, so nothing unavailable can enter a recommended scheme.
+   */
+  const shadeRows = await db
     .select({
       code: t.shades.code,
       name: t.shades.name,
@@ -75,10 +88,27 @@ export async function dealerCatalogue(dealerId: string) {
       family: t.shades.family,
       wallSafe: t.shades.wallSafe,
       exteriorSuitable: t.shades.exteriorSuitable,
+      producible: t.dealerShades.producible,
+      blockedReason: t.dealerShades.blockedReason,
     })
-    .from(t.dealerShades)
-    .innerJoin(t.shades, eq(t.dealerShades.shadeCode, t.shades.code))
-    .where(and(eq(t.dealerShades.dealerId, dealerId), eq(t.dealerShades.producible, true)));
+    .from(t.shades)
+    .leftJoin(
+      t.dealerShades,
+      and(eq(t.dealerShades.shadeCode, t.shades.code), eq(t.dealerShades.dealerId, dealerId)),
+    );
+
+  const shades = shadeRows.map((s) => ({
+    code: s.code,
+    name: s.name,
+    hex: s.hex,
+    family: s.family,
+    wallSafe: s.wallSafe,
+    exteriorSuitable: s.exteriorSuitable,
+    // A shade with no row for this dealer has never been assessed, and an
+    // unassessed shade must not be offered as mixable.
+    available: s.producible === true,
+    blockedReason: s.blockedReason,
+  }));
 
   return { brands, categories, shades, productCount: rows.length };
 }

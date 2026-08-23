@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { DEALER_ID } from "@/db/seed";
+import { currentDealerId } from "@/server/auth";
 import { commitImport, parseTally, previewImport } from "@/server/tally";
 
 export const runtime = "nodejs";
@@ -15,7 +15,8 @@ export const dynamic = "force-dynamic";
  * confidence and the value it would replace, before a single row is written.
  */
 export async function POST(req: Request) {
-  const dealerId = new URL(req.url).searchParams.get("dealerId") ?? DEALER_ID;
+  const dealerId = await currentDealerId(req);
+  if (!dealerId) return NextResponse.json({ error: "unauthorised" }, { status: 401 });
   const contentType = req.headers.get("content-type") ?? "";
 
   /* ---------------------------- phase 1: dry run --------------------------- */

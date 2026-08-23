@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import QRCode from "qrcode";
 import { createSession, listSessions } from "@/server/sessions";
-import { DEALER_ID } from "@/db/seed";
+import { currentDealerId } from "@/server/auth";
 import { customerUrl, isPubliclyReachable, publicAppUrl, SESSION_DURATION_HOURS } from "@/lib/config";
 
 export const runtime = "nodejs";
@@ -9,7 +9,10 @@ export const dynamic = "force-dynamic";
 
 /** Dealer: list every session issued, newest first. */
 export async function GET(req: Request) {
-  const dealerId = new URL(req.url).searchParams.get("dealerId") ?? DEALER_ID;
+  // The tenant comes from the signed cookie. Never from a query parameter:
+  // an id a client can type is not a boundary.
+  const dealerId = await currentDealerId(req);
+  if (!dealerId) return NextResponse.json({ error: "unauthorised" }, { status: 401 });
   const sessions = await listSessions(dealerId);
   const origin = publicAppUrl(new URL(req.url).origin);
 
@@ -29,6 +32,9 @@ export async function GET(req: Request) {
  * customer points a phone at it.
  */
 export async function POST(req: Request) {
+  const dealerId = await currentDealerId(req);
+  if (!dealerId) return NextResponse.json({ error: "unauthorised" }, { status: 401 });
+
   const body = await req.json().catch(() => ({}));
   const origin = publicAppUrl(new URL(req.url).origin);
 
@@ -40,7 +46,7 @@ export async function POST(req: Request) {
     Number.isFinite(requested) && requested >= 0 ? requested : SESSION_DURATION_HOURS;
 
   const session = await createSession({
-    dealerId: body.dealerId ?? DEALER_ID,
+    dealerId,
     customerName: String(body.customerName ?? ""),
     phone: body.phone ? String(body.phone) : undefined,
     validityHours,

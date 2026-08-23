@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { recommendSchemes, type CustomerSpec } from "@/lib/recommend";
 import { dealerAvailability } from "@/server/availability";
 import { getSessionByToken, saveRecommendations } from "@/server/sessions";
-import { DEALER_ID } from "@/db/seed";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,13 +26,13 @@ export async function POST(req: Request) {
   const spec = body.spec as CustomerSpec | undefined;
   if (!spec) return NextResponse.json({ error: "missing_spec" }, { status: 400 });
 
-  let dealerId = DEALER_ID;
-  if (body.token) {
-    const session = await getSessionByToken(String(body.token));
-    if (!session) return NextResponse.json({ error: "not_found" }, { status: 404 });
-    if (session.expired) return NextResponse.json({ error: "expired" }, { status: 410 });
-    dealerId = session.dealerId;
-  }
+  // The session token decides the dealer. There is no default: a request with
+  // no token has no tenant, and answering it from some fallback shop would mean
+  // recommending one dealer's stock to another dealer's customer.
+  const session = body.token ? await getSessionByToken(String(body.token)) : null;
+  if (!session) return NextResponse.json({ error: "not_found" }, { status: 404 });
+  if (session.expired) return NextResponse.json({ error: "expired" }, { status: 410 });
+  const dealerId = session.dealerId;
 
   const availability = await dealerAvailability(dealerId);
   const schemes = recommendSchemes(spec, {

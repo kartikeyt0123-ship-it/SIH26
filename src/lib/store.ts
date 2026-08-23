@@ -220,11 +220,133 @@ export type DealerCatalogue = {
     family: string;
     wallSafe: boolean;
     exteriorSuitable: boolean;
+    /** False when this dealer cannot tint it today. Shown, not hidden. */
+    available: boolean;
+    blockedReason: string | null;
   }[];
   productCount: number;
 };
 
-export const fetchCatalogue = () => call<DealerCatalogue>("/api/catalog");
+/**
+ * The catalogue for a specific session's dealer.
+ *
+ * The token is required from the customer app: the endpoint resolves the dealer
+ * from it rather than accepting a dealer id, so a customer can only ever see
+ * the shop that issued their link.
+ */
+export const fetchCatalogue = (token?: string) =>
+  call<DealerCatalogue>(token ? `/api/catalog?token=${encodeURIComponent(token)}` : "/api/catalog");
+
+/* --------------------------- Round 2: intelligence ------------------------ */
+
+import type { SurfaceObservation, SurfaceReport } from "./surface";
+import type { DesignDNA, DesignSignal } from "./dna";
+import type { MaterialSuggestion, Placement } from "./materials";
+import type { ClimateAdvice, ClimateContext } from "./climate";
+import type { Intent } from "./whatif";
+
+/** Persist a surface reading measured in the browser. */
+export const postSurfaceReport = (
+  token: string,
+  report: SurfaceReport,
+  surface: "interior" | "exterior",
+) =>
+  call<{ session: SessionDTO; disclosure: string }>(`/api/sessions/${token}/surface`, {
+    method: "POST",
+    body: JSON.stringify({
+      observations: report.observations,
+      surface,
+      imageCount: report.imageCount,
+    }),
+  });
+
+/**
+ * Record what the customer did, and get the re-derived profile back.
+ *
+ * Failures are swallowed by the caller on purpose: a preference signal that
+ * does not reach the server is a slightly thinner profile, and it must never
+ * be allowed to interrupt someone choosing a colour.
+ */
+export const postDesignSignals = (token: string, signals: DesignSignal[]) =>
+  call<{ dna: DesignDNA; disclosure: string }>(`/api/sessions/${token}/dna`, {
+    method: "POST",
+    body: JSON.stringify({ signals }),
+  });
+
+export const fetchDesignDNA = (token: string) =>
+  call<{ dna: DesignDNA; disclosure: string }>(`/api/sessions/${token}/dna`);
+
+export const fetchWhatIf = (input: {
+  token: string;
+  intent: Intent;
+  spec: CustomerSpec;
+  photoHex?: string;
+}) =>
+  call<{
+    intent: Intent;
+    prompt: string;
+    schemes: Scheme[];
+    changed: string[];
+    engine: string;
+    stockedLines: number;
+    producibleShades: number;
+  }>(`/api/sessions/${input.token}/whatif`, {
+    method: "POST",
+    body: JSON.stringify({ intent: input.intent, spec: input.spec, photoHex: input.photoHex }),
+  });
+
+export type MaterialsResponse = {
+  materials: {
+    engine: string;
+    groups: { placement: Placement; items: MaterialSuggestion[] }[];
+    all: MaterialSuggestion[];
+    disclosure: string;
+  };
+  climate: {
+    context: ClimateContext;
+    advice: ClimateAdvice[];
+    live: boolean;
+    disclosure: string;
+  };
+};
+
+export const fetchMaterials = (input: {
+  token: string;
+  mainHex: string;
+  accentHex: string;
+  surface: "interior" | "exterior";
+  conditions: string[];
+  roomType?: string;
+  roomSize?: "small" | "medium" | "large";
+  budget?: string;
+}) =>
+  call<MaterialsResponse>(`/api/sessions/${input.token}/materials`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+
+/** What the dealer can mix instead of a colour they cannot produce today. */
+export const fetchSubstitutes = (token: string, code: string, surface: "interior" | "exterior") =>
+  call<{
+    available: boolean;
+    wanted: { code: string; name: string; hex: string };
+    headline: string;
+    substitutes: {
+      shade: { code: string; name: string; hex: string };
+      deltaE: number;
+      closeness: string;
+      why: string;
+    }[];
+  }>(`/api/sessions/${token}/shade-request?code=${encodeURIComponent(code)}&surface=${surface}`);
+
+/** Put a colour the customer wants on the dealer's dashboard, by name. */
+export const requestShade = (token: string, code: string, substituteCode?: string) =>
+  call<{ ok: true; id: string; duplicate?: boolean }>(
+    `/api/sessions/${token}/shade-request`,
+    { method: "POST", body: JSON.stringify({ code, substituteCode }) },
+  );
+
+export type { SurfaceObservation, SurfaceReport, DesignDNA, DesignSignal };
 
 /* -------------------------------- helpers -------------------------------- */
 

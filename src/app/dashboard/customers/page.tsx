@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check, FileText, Ruler, Send } from "lucide-react";
+import { AlertTriangle, Check, FileText, MessageCircle, Ruler, Send } from "lucide-react";
 import { CategoryChip, PageHead, Panel, PanelHead, Tag } from "@/components/dashboard/ui";
 import { LINE_BY_ID } from "@/lib/catalog";
-import { PROPOSALS, proposalTotal, type Proposal } from "@/lib/demo";
 import { buildQuote } from "@/lib/quote";
 import type { CustomerSpec } from "@/lib/recommend";
 import type { Measurements, SelectedScheme, SessionDTO } from "@/lib/session-types";
 import { createQuotation, useDealerSessions } from "@/lib/store";
+import { quotationMessage, waLink } from "@/lib/whatsapp";
 import { cn, inr } from "@/lib/utils";
 
 /**
@@ -26,26 +26,19 @@ export default function CustomersPage() {
     [sessions],
   );
 
-  const [selected, setSelected] = useState<{ kind: "session" | "proposal"; id: string }>({
-    kind: "proposal",
-    id: PROPOSALS[0].id,
-  });
+  const [selectedToken, setSelectedToken] = useState<string | null>(null);
 
   // A design that arrives while the dealer is on this screen becomes the thing
   // he is looking at. That is the entire point of a queue.
   useEffect(() => {
-    if (
-      ready &&
-      incoming.length &&
-      selected.kind === "proposal" &&
-      selected.id === PROPOSALS[0].id
-    ) {
-      setSelected({ kind: "session", id: incoming[0].token });
+    if (!ready || !incoming.length) return;
+    // Re-point if the current selection has gone (revoked, or expired away).
+    if (!selectedToken || !incoming.some((s) => s.token === selectedToken)) {
+      setSelectedToken(incoming[0].token);
     }
-  }, [ready, incoming, selected]);
+  }, [ready, incoming, selectedToken]);
 
-  const session = incoming.find((s) => s.token === selected.id);
-  const proposal = PROPOSALS.find((p) => p.id === selected.id);
+  const session = incoming.find((s) => s.token === selectedToken);
   const awaiting = incoming.filter((s) => s.project?.status === "SUBMITTED").length;
 
   return (
@@ -53,7 +46,11 @@ export default function CustomersPage() {
       <PageHead
         eyebrow="Customers"
         title="Designs waiting to become orders."
-        lede={`${awaiting} from customer links, ${PROPOSALS.filter((p) => p.status === "new").length} from the counter. Each arrived with its surfaces already specified.`}
+        lede={
+          ready
+            ? `${awaiting} awaiting a quotation, ${incoming.length - awaiting} already quoted. Each arrived with its surfaces already specified.`
+            : "Loading your queue…"
+        }
       />
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,23rem)_minmax(0,1fr)]">
@@ -61,19 +58,19 @@ export default function CustomersPage() {
           <Panel pad={false} className="h-fit overflow-hidden">
             <div className="p-5 pb-0">
               <PanelHead
-                title="From customer links"
+                title="Submitted designs"
                 sub={ready ? `${incoming.length} received · live` : "Loading…"}
               />
             </div>
             <div className="divide-y divide-[color-mix(in_oklab,var(--color-paper-200)_8%,transparent)]">
               {incoming.map((s) => {
-                const on = selected.kind === "session" && selected.id === s.token;
+                const on = selectedToken === s.token;
                 const chosen = s.project?.savedDesigns.find((d) => d.isChosen)
                   ?.scheme as unknown as SelectedScheme | undefined;
                 return (
                   <button
                     key={s.token}
-                    onClick={() => setSelected({ kind: "session", id: s.token })}
+                    onClick={() => setSelectedToken(s.token)}
                     className={cn(
                       "relative flex w-full items-center gap-3 px-5 py-4 text-left transition-colors duration-200",
                       on ? "bg-ink-700/70" : "hover:bg-ink-700/40",
@@ -86,9 +83,12 @@ export default function CustomersPage() {
                       )}
                     />
                     <span className="flex shrink-0 gap-1">
+                      {/* Keyed by role. A scheme routinely repeats a shade —
+                          a ceiling matching the walls is a normal result — so
+                          the shade code is not unique among these siblings. */}
                       {chosen
-                        ? Object.values(chosen.shades).map((c) => (
-                            <span key={c.code} style={{ background: c.hex }} className="h-8 w-2 rounded-sm" />
+                        ? Object.entries(chosen.shades).map(([role, c]) => (
+                            <span key={role} style={{ background: c.hex }} className="h-8 w-2 rounded-sm" />
                           ))
                         : <span className="h-8 w-8 rounded-sm bg-ink-700" />}
                     </span>
@@ -117,53 +117,19 @@ export default function CustomersPage() {
             </div>
           </Panel>
 
-          <Panel pad={false} className="h-fit overflow-hidden">
-            <div className="p-5 pb-0">
-              <PanelHead title="From the counter" sub={`${PROPOSALS.length} earlier designs`} />
-            </div>
-            <div className="divide-y divide-[color-mix(in_oklab,var(--color-paper-200)_8%,transparent)]">
-              {PROPOSALS.map((x) => {
-                const on = selected.kind === "proposal" && selected.id === x.id;
-                return (
-                  <button
-                    key={x.id}
-                    onClick={() => setSelected({ kind: "proposal", id: x.id })}
-                    className={cn(
-                      "relative flex w-full items-center gap-3 px-5 py-4 text-left transition-colors duration-200",
-                      on ? "bg-ink-700/70" : "hover:bg-ink-700/40",
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "absolute top-1/2 left-0 h-8 w-[2px] -translate-y-1/2 rounded-full bg-pigment transition-transform duration-300",
-                        on ? "scale-y-100" : "scale-y-0",
-                      )}
-                    />
-                    <span className="flex shrink-0 gap-1">
-                      {x.palette.slice(0, 4).map((c) => (
-                        <span key={c} style={{ background: c }} className="h-8 w-2 rounded-sm" />
-                      ))}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[0.875rem] text-paper-50">{x.customer}</span>
-                      <span className="data block truncate text-[0.625rem] tracking-[0.08em] text-paper-400 uppercase">
-                        {x.space} · {x.sqft} sq ft · {x.submitted}
-                      </span>
-                    </span>
-                    <Tag status={x.status} />
-                  </button>
-                );
-              })}
-            </div>
-          </Panel>
         </div>
 
         <div className="flex flex-col gap-4">
-          {selected.kind === "session" && session ? (
+          {session ? (
             <SessionDetail key={session.token} session={session} />
-          ) : proposal ? (
-            <ProposalDetail p={proposal} />
-          ) : null}
+          ) : (
+            <Panel>
+              <p className="text-[0.9375rem] text-paper-50">No design selected.</p>
+              <p className="mt-2 text-[0.8125rem] leading-relaxed text-paper-400">
+                Designs land here the moment a customer submits from their phone.
+              </p>
+            </Panel>
+          )}
         </div>
       </div>
     </>
@@ -177,6 +143,11 @@ function SessionDetail({ session }: { session: SessionDTO }) {
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState<string[]>([]);
   const [sent, setSent] = useState(session.project?.status === "QUOTED");
+  // The id of the quotation that now exists, so the PDF and WhatsApp actions
+  // can point at a real stored document rather than a recomputed estimate.
+  const [quotationId, setQuotationId] = useState<string | null>(
+    session.project?.quotation?.id ?? null,
+  );
 
   const project = session.project;
   const scheme = project?.savedDesigns.find((d) => d.isChosen)?.scheme as
@@ -211,7 +182,8 @@ function SessionDetail({ session }: { session: SessionDTO }) {
     setBusy(true);
     setBlocked([]);
     try {
-      await createQuotation({ token: session.token, discountPct: discount, override });
+      const r = await createQuotation({ token: session.token, discountPct: discount, override });
+      setQuotationId(r.quotationId);
       setSent(true);
     } catch (e) {
       const err = e as { body?: { blocked?: string[] }; message: string };
@@ -272,8 +244,12 @@ function SessionDetail({ session }: { session: SessionDTO }) {
                   return (
                     <span key={d.id} className="flex items-center gap-2">
                       <span className="flex gap-0.5">
-                        {Object.values(sc.shades).map((s) => (
-                          <span key={s.code} style={{ background: s.hex }} className="h-5 w-2 rounded-sm" />
+                        {/* Keyed by ROLE, not by shade code. A scheme may put
+                            the same shade on two surfaces — a ceiling matching
+                            the walls is a normal outcome — and keying on the
+                            code makes React see duplicate siblings. */}
+                        {Object.entries(sc.shades).map(([role, s]) => (
+                          <span key={role} style={{ background: s.hex }} className="h-5 w-2 rounded-sm" />
                         ))}
                       </span>
                       <span className="text-[0.75rem] text-paper-400">{d.label ?? sc.title}</span>
@@ -289,6 +265,9 @@ function SessionDetail({ session }: { session: SessionDTO }) {
             “{project.customerNote}”
           </p>
         )}
+
+        <SurfaceSummary project={project} />
+        <DNASummary project={project} />
 
         {project.images.length > 0 && (
           <div className="mt-4 grid grid-cols-3 gap-2">
@@ -441,98 +420,257 @@ function SessionDetail({ session }: { session: SessionDTO }) {
             </>
           )}
         </button>
+
+        {blocked.length > 0 && (
+          <div className="mt-4 rounded-xl border border-[color-mix(in_oklab,var(--color-pigment)_40%,transparent)] bg-[color-mix(in_oklab,var(--color-pigment)_8%,transparent)] p-4">
+            <p className="text-[0.875rem] text-paper-100">
+              Out of stock right now: {blocked.join(", ")}.
+            </p>
+            <button
+              onClick={() => send(true)}
+              className="mt-3 text-[0.8125rem] text-pigment-soft underline underline-offset-4"
+            >
+              Quote anyway — I can source these
+            </button>
+          </div>
+        )}
+
+        {sent && quotationId && (
+          <Delivery
+            quotationId={quotationId}
+            customerName={session.customerName}
+            phone={session.phone}
+            total={total}
+            itemCount={quote.lines.length}
+          />
+        )}
       </Panel>
     </>
   );
 }
 
-/* ---------------------------- counter proposals ---------------------------- */
+/**
+ * Getting the quotation to the customer.
+ *
+ * Two real actions. The PDF is the stored document, rendered server-side from
+ * the saved quotation row. The WhatsApp button opens a pre-filled chat — it
+ * does not send, and the label says so, because sending requires the WhatsApp
+ * Business API and claiming otherwise would leave a dealer believing a customer
+ * had been contacted when nobody had.
+ */
+function Delivery({
+  quotationId,
+  customerName,
+  phone,
+  total,
+  itemCount,
+}: {
+  quotationId: string;
+  customerName: string;
+  phone: string | null;
+  total: number;
+  itemCount: number;
+}) {
+  const [origin, setOrigin] = useState("");
+  useEffect(() => setOrigin(window.location.origin), []);
 
-function ProposalDetail({ p }: { p: Proposal }) {
-  const [discount, setDiscount] = useState(0);
-  const subtotal = proposalTotal(p);
-  const total = Math.round(subtotal * (1 - discount / 100));
+  const pdfUrl = `${origin}/api/quotations/${quotationId}/pdf`;
+  const wa = waLink(
+    phone,
+    quotationMessage({
+      customerName,
+      dealerName: "your dealer",
+      total,
+      pdfUrl,
+      itemCount,
+    }),
+  );
 
   return (
-    <>
-      <Panel>
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-3">
-              <h2 className="display text-[1.75rem]">{p.customer}</h2>
-              <Tag status={p.status} />
-            </div>
-            <p className="data mt-1.5 text-[0.6875rem] tracking-[0.1em] text-paper-400 uppercase">
-              {p.phone} · {p.locality} · {p.space} · {p.sqft} sq ft
-            </p>
-          </div>
-          <div className="flex gap-1.5">
-            {p.palette.map((c) => (
-              <span key={c} style={{ background: c }} className="h-11 w-11 rounded-xl ring-1 ring-white/10" />
-            ))}
-          </div>
-        </div>
-        {p.note && (
-          <p className="mt-5 rounded-xl border border-[color-mix(in_oklab,var(--color-brass)_35%,transparent)] bg-[color-mix(in_oklab,var(--color-brass)_8%,transparent)] px-4 py-3 text-[0.8125rem] text-paper-200">
-            {p.note}
-          </p>
-        )}
-      </Panel>
+    <div className="mt-5 border-t border-[color-mix(in_oklab,var(--color-paper-200)_10%,transparent)] pt-5">
+      <p className="eyebrow mb-3">Send it to them</p>
+      <div className="flex flex-wrap gap-2.5">
+        <a
+          href={`/api/quotations/${quotationId}/pdf`}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-2 rounded-full border border-[color-mix(in_oklab,var(--color-paper-200)_18%,transparent)] px-4 py-2.5 text-[0.8125rem] text-paper-100 transition-colors hover:border-pigment hover:text-paper-50"
+        >
+          <FileText className="h-4 w-4" strokeWidth={1.7} /> Open PDF
+        </a>
 
-      <Panel>
-        <PanelHead title="Specification" sub="Captured at the counter." />
-        <div className="divide-y divide-[color-mix(in_oklab,var(--color-paper-200)_8%,transparent)]">
-          {p.surfaces.map((l, i) => (
-            <div
-              key={i}
-              className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 py-3 sm:grid-cols-[7rem_minmax(0,1fr)_6rem_auto]"
-            >
-              <span className="data text-[0.625rem] tracking-[0.12em] text-paper-400 uppercase">
-                {l.surface}
+        {wa ? (
+          <a
+            href={wa}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-2 rounded-full bg-[#25D366] px-4 py-2.5 text-[0.8125rem] font-medium text-[#04310f] transition-transform hover:-translate-y-px"
+          >
+            <MessageCircle className="h-4 w-4" strokeWidth={2} /> Open in WhatsApp
+          </a>
+        ) : (
+          <span className="inline-flex items-center gap-2 rounded-full border border-[color-mix(in_oklab,var(--color-paper-200)_14%,transparent)] px-4 py-2.5 text-[0.8125rem] text-paper-400">
+            <MessageCircle className="h-4 w-4" strokeWidth={1.7} /> No mobile number on file
+          </span>
+        )}
+      </div>
+      <p className="mt-2.5 text-[0.75rem] leading-relaxed text-paper-400">
+        {wa
+          ? "WhatsApp opens with the message and the PDF link ready — you press send. We cannot check whether this number is on WhatsApp until you try."
+          : "Ask the customer for a mobile number on their next visit and it will appear here."}
+      </p>
+    </div>
+  );
+}
+
+/* ---------------------------- counter proposals ---------------------------- */
+
+/* --------------------- Round 2: what the customer saw --------------------- */
+
+/**
+ * The customer's surface reading, shown to the dealer verbatim.
+ *
+ * Verbatim matters. The dealer and the customer have to be looking at the same
+ * sentences when they talk at the counter, and a summarised or re-worded
+ * version here is how a customer ends up saying "the app told me it was damp"
+ * about something the app never said.
+ */
+function SurfaceSummary({ project }: { project: NonNullable<SessionDTO["project"]> }) {
+  const surface = project.surface as {
+    observations?: { label: string; severity: string; evidence: string }[];
+    prep?: { order: number; title: string; triggered: boolean }[];
+    severity?: string;
+    engine?: string;
+  } | null;
+  if (!surface) return null;
+
+  const flagged = (surface.observations ?? []).filter((o) => o.severity !== "ok");
+  const needed = (surface.prep ?? []).filter((p) => p.triggered);
+
+  return (
+    <div className="mt-4 rounded-xl border border-[color-mix(in_oklab,var(--color-paper-200)_11%,transparent)] p-4">
+      <div className="flex items-center justify-between gap-3">
+        <span className="eyebrow">Surface health</span>
+        <Tag
+          status={
+            surface.severity === "significant"
+              ? "critical"
+              : surface.severity === "moderate"
+                ? "low"
+                : "healthy"
+          }
+        >
+          {surface.severity ?? "none"}
+        </Tag>
+      </div>
+
+      {flagged.length === 0 ? (
+        <p className="mt-2 text-[0.8125rem] text-paper-300">
+          Nothing stood out in the customer&rsquo;s photographs.
+        </p>
+      ) : (
+        <ul className="mt-2.5 flex flex-col gap-2">
+          {flagged.map((o) => (
+            <li key={o.label} className="text-[0.8125rem]">
+              <span className="text-paper-100">⚠ {o.label}</span>
+              <span className="mt-0.5 block text-[0.6875rem] leading-relaxed text-paper-400">
+                {o.evidence}
               </span>
-              <span className="min-w-0">
-                <span className="block truncate text-[0.875rem] text-paper-100">{l.spec}</span>
-                <CategoryChip type={l.category} className="mt-1 sm:hidden" />
-              </span>
-              <span className="data hidden text-[0.75rem] text-paper-400 sm:block">{l.qty}</span>
-              <span className="data text-right text-[0.875rem] text-paper-50">{inr(l.amount)}</span>
-            </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {needed.length > 0 && (
+        <p className="mt-3 text-[0.75rem] leading-relaxed text-paper-300">
+          Preparation this job needs:{" "}
+          <span className="text-paper-100">{needed.map((p) => p.title).join(" → ")}</span>. These are
+          quotable lines — the customer has already been shown why each one is there.
+        </p>
+      )}
+
+      <p className="mt-3 text-[0.6875rem] leading-relaxed text-paper-400">
+        Read from the customer&rsquo;s photographs by pixel statistics ({surface.engine}). Possible
+        issues to check in person — not an inspection, and not confirmed damage.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * The taste profile, narrowed for the dealer.
+ *
+ * Only style, palette, finish, budget and the colours. No note, no phone, no
+ * interaction history — a dealer serves this customer better knowing they keep
+ * choosing warm neutrals in matte, and needs nothing beyond that.
+ */
+function DNASummary({ project }: { project: NonNullable<SessionDTO["project"]> }) {
+  const dna = project.dna as {
+    style?: { value: string };
+    palette?: { value: string };
+    finish?: { value: string };
+    budget?: { value: string };
+    colours?: { hex: string; name: string }[];
+    provisional?: boolean;
+  } | null;
+  if (!dna) return null;
+
+  const rows = [
+    ["Style", dna.style?.value],
+    ["Palette", dna.palette?.value],
+    ["Finish", dna.finish?.value],
+    ["Budget", dna.budget?.value],
+  ].filter(([, v]) => v && v !== "Not yet clear") as [string, string][];
+
+  if (!rows.length && !dna.colours?.length) return null;
+
+  return (
+    <div className="mt-4 rounded-xl border border-[color-mix(in_oklab,var(--color-paper-200)_11%,transparent)] p-4">
+      <div className="flex items-center justify-between gap-3">
+        <span className="eyebrow">Design DNA</span>
+        {dna.provisional && (
+          <span className="data text-[0.5625rem] tracking-[0.12em] text-paper-400 uppercase">
+            still forming
+          </span>
+        )}
+      </div>
+
+      <dl className="mt-2.5 grid grid-cols-2 gap-x-4 gap-y-2.5">
+        {rows.map(([k, v]) => (
+          <div key={k}>
+            <dt className="data text-[0.5625rem] tracking-[0.1em] text-paper-400 uppercase">{k}</dt>
+            <dd className="mt-0.5 text-[0.8125rem] text-paper-100 capitalize">{v}</dd>
+          </div>
+        ))}
+      </dl>
+
+      {dna.colours && dna.colours.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {dna.colours.map((c) => (
+            <span key={c.hex} className="flex items-center gap-1.5">
+              <span
+                style={{ background: c.hex }}
+                className="h-4 w-4 rounded ring-1 ring-white/10"
+                aria-hidden="true"
+              />
+              <span className="text-[0.6875rem] text-paper-400">{c.name}</span>
+            </span>
           ))}
         </div>
-      </Panel>
+      )}
 
-      <Panel>
-        <PanelHead title="Quotation" sub="Your pricing, your margin." />
-        <div className="grid gap-6 sm:grid-cols-[minmax(0,1fr)_minmax(0,16rem)]">
-          <div>
-            <label className="eyebrow">Discount</label>
-            <div className="mt-3 flex items-center gap-4">
-              <input
-                type="range"
-                min={0}
-                max={15}
-                step={0.5}
-                value={discount}
-                onChange={(e) => setDiscount(Number(e.target.value))}
-                className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-ink-700 accent-[var(--color-pigment)]"
-              />
-              <span className="data w-16 text-right text-[1.05rem] text-paper-50">
-                {discount.toFixed(1)}%
-              </span>
-            </div>
-          </div>
-          <div className="rounded-xl bg-[color-mix(in_oklab,var(--color-pigment)_9%,transparent)] p-4">
-            <div className="flex items-baseline justify-between text-[0.8125rem]">
-              <span className="text-paper-300">Materials</span>
-              <span className="data text-paper-100">{inr(subtotal)}</span>
-            </div>
-            <div className="mt-3 flex items-baseline justify-between border-t border-[color-mix(in_oklab,var(--color-paper-200)_14%,transparent)] pt-3">
-              <span className="text-[0.8125rem] text-paper-200">Quotation total</span>
-              <span className="data text-[1.2rem] text-paper-50">{inr(total)}</span>
-            </div>
-          </div>
-        </div>
-      </Panel>
-    </>
+      {project.variationCount > 0 && (
+        <p className="mt-3 text-[0.6875rem] leading-relaxed text-paper-400">
+          Explored {project.variationCount} alternative direction
+          {project.variationCount === 1 ? "" : "s"}
+          {project.lastIntent ? `, most recently "${project.lastIntent}"` : ""}. Worth asking about.
+        </p>
+      )}
+
+      <p className="mt-2 text-[0.6875rem] leading-relaxed text-paper-400">
+        Built from what this customer opened, saved and skipped, using fixed rules. Not machine
+        learning, and not a prediction.
+      </p>
+    </div>
   );
 }

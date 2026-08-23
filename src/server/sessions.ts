@@ -138,23 +138,42 @@ async function hydrate(row: typeof t.customerSessions.$inferSelect): Promise<Ses
 export async function hydrateProject(projectId: string): Promise<ProjectDTO> {
   const db = await getDb();
 
-  const [project, req, viz, images, designs, quote] = await Promise.all([
-    db.query.projects.findFirst({ where: eq(t.projects.id, projectId) }),
-    db.query.requirements.findFirst({ where: eq(t.requirements.projectId, projectId) }),
-    db.query.visualizations.findFirst({
-      where: eq(t.visualizations.projectId, projectId),
-      orderBy: desc(t.visualizations.createdAt),
-    }),
-    db.query.projectImages.findMany({
-      where: eq(t.projectImages.projectId, projectId),
-      orderBy: t.projectImages.position,
-    }),
-    db.query.savedDesigns.findMany({ where: eq(t.savedDesigns.projectId, projectId) }),
-    db.query.quotations.findFirst({
-      where: eq(t.quotations.projectId, projectId),
-      orderBy: desc(t.quotations.createdAt),
-    }),
-  ]);
+  // The four Round 2 reads join this existing Promise.all rather than forming a
+  // second round trip. The customer app polls this endpoint, so an extra
+  // sequential await here would be felt on every poll on a phone.
+  const [project, req, viz, images, designs, quote, surface, profile, variations, climate] =
+    await Promise.all([
+      db.query.projects.findFirst({ where: eq(t.projects.id, projectId) }),
+      db.query.requirements.findFirst({ where: eq(t.requirements.projectId, projectId) }),
+      db.query.visualizations.findFirst({
+        where: eq(t.visualizations.projectId, projectId),
+        orderBy: desc(t.visualizations.createdAt),
+      }),
+      db.query.projectImages.findMany({
+        where: eq(t.projectImages.projectId, projectId),
+        orderBy: t.projectImages.position,
+      }),
+      db.query.savedDesigns.findMany({ where: eq(t.savedDesigns.projectId, projectId) }),
+      db.query.quotations.findFirst({
+        where: eq(t.quotations.projectId, projectId),
+        orderBy: desc(t.quotations.createdAt),
+      }),
+      db.query.surfaceAnalyses.findFirst({
+        where: eq(t.surfaceAnalyses.projectId, projectId),
+        orderBy: desc(t.surfaceAnalyses.createdAt),
+      }),
+      db.query.designProfiles.findFirst({
+        where: eq(t.designProfiles.projectId, projectId),
+      }),
+      db.query.designVariations.findMany({
+        where: eq(t.designVariations.projectId, projectId),
+        orderBy: desc(t.designVariations.createdAt),
+      }),
+      db.query.climateContexts.findFirst({
+        where: eq(t.climateContexts.projectId, projectId),
+        orderBy: desc(t.climateContexts.createdAt),
+      }),
+    ]);
 
   const spec = (req?.parsedSpec ?? null) as Record<string, unknown> | null;
 
@@ -192,6 +211,22 @@ export async function hydrateProject(projectId: string): Promise<ProjectDTO> {
       : null,
     submittedAt: project?.submittedAt?.toISOString() ?? null,
     customerNote: (spec?.customerNote as string) ?? null,
+
+    // Round 2. Null is the normal case, not an error case.
+    surface: surface
+      ? {
+          engine: surface.engine,
+          observations: surface.observations,
+          prep: surface.prepPlan,
+          severity: surface.severity,
+          confidence: surface.confidence,
+          analysedAt: surface.createdAt.toISOString(),
+        }
+      : null,
+    dna: (profile?.profile ?? null) as Record<string, unknown> | null,
+    variationCount: variations.length,
+    lastIntent: variations[0]?.intent ?? null,
+    climate: climate ? { ...(climate.data as object), source: climate.source } : null,
   };
 }
 
@@ -235,18 +270,35 @@ export async function listSessions(dealerId: string): Promise<SessionDTO[]> {
   });
   const projectIds = projects.map((p) => p.id);
 
-  const [reqs, vizzes, images, designs, quotes] = projectIds.length
-    ? await Promise.all([
-        db.query.requirements.findMany({ where: inArray(t.requirements.projectId, projectIds) }),
-        db.query.visualizations.findMany({ where: inArray(t.visualizations.projectId, projectIds) }),
-        db.query.projectImages.findMany({
-          where: inArray(t.projectImages.projectId, projectIds),
-          orderBy: t.projectImages.position,
-        }),
-        db.query.savedDesigns.findMany({ where: inArray(t.savedDesigns.projectId, projectIds) }),
-        db.query.quotations.findMany({ where: inArray(t.quotations.projectId, projectIds) }),
-      ])
-    : [[], [], [], [], []];
+  // Four more tables, still one query each for the whole dealer. The cost of
+  // this function stays constant in the number of sessions, which is the
+  // property the five-second dashboard poll depends on.
+  const [reqs, vizzes, images, designs, quotes, surfaces, profiles, variations, climates] =
+    projectIds.length
+      ? await Promise.all([
+          db.query.requirements.findMany({ where: inArray(t.requirements.projectId, projectIds) }),
+          db.query.visualizations.findMany({ where: inArray(t.visualizations.projectId, projectIds) }),
+          db.query.projectImages.findMany({
+            where: inArray(t.projectImages.projectId, projectIds),
+            orderBy: t.projectImages.position,
+          }),
+          db.query.savedDesigns.findMany({ where: inArray(t.savedDesigns.projectId, projectIds) }),
+          db.query.quotations.findMany({ where: inArray(t.quotations.projectId, projectIds) }),
+          db.query.surfaceAnalyses.findMany({
+            where: inArray(t.surfaceAnalyses.projectId, projectIds),
+          }),
+          db.query.designProfiles.findMany({
+            where: inArray(t.designProfiles.projectId, projectIds),
+          }),
+          db.query.designVariations.findMany({
+            where: inArray(t.designVariations.projectId, projectIds),
+            orderBy: desc(t.designVariations.createdAt),
+          }),
+          db.query.climateContexts.findMany({
+            where: inArray(t.climateContexts.projectId, projectIds),
+          }),
+        ])
+      : [[], [], [], [], [], [], [], [], []];
 
   const group = <T extends { projectId: string }>(list: T[]) => {
     const m = new Map<string, T[]>();
@@ -263,6 +315,10 @@ export async function listSessions(dealerId: string): Promise<SessionDTO[]> {
   const byProjectImg = group(images);
   const byProjectDesign = group(designs);
   const byProjectQuote = group(quotes);
+  const byProjectSurface = group(surfaces);
+  const byProjectProfile = group(profiles);
+  const byProjectVariation = group(variations);
+  const byProjectClimate = group(climates);
   const projectBySession = new Map(projects.map((p) => [p.sessionId, p]));
 
   // Sessions that ran out are marked once, in a single statement, rather than
@@ -284,6 +340,11 @@ export async function listSessions(dealerId: string): Promise<SessionDTO[]> {
     const viz = project ? byProjectViz.get(project.id)?.slice(-1)[0] : undefined;
     const quote = project ? byProjectQuote.get(project.id)?.slice(-1)[0] : undefined;
     const spec = (req?.parsedSpec ?? null) as Record<string, unknown> | null;
+    // Most recent analysis wins; the list is already ordered by insertion.
+    const surface = project ? byProjectSurface.get(project.id)?.slice(-1)[0] : undefined;
+    const profile = project ? byProjectProfile.get(project.id)?.[0] : undefined;
+    const vars = project ? (byProjectVariation.get(project.id) ?? []) : [];
+    const climate = project ? byProjectClimate.get(project.id)?.slice(-1)[0] : undefined;
 
     return {
       id: row.id,
@@ -332,6 +393,23 @@ export async function listSessions(dealerId: string): Promise<SessionDTO[]> {
               : null,
             submittedAt: project.submittedAt?.toISOString() ?? null,
             customerNote: (spec?.customerNote as string) ?? null,
+
+            surface: surface
+              ? {
+                  engine: surface.engine,
+                  observations: surface.observations,
+                  prep: surface.prepPlan,
+                  severity: surface.severity,
+                  confidence: surface.confidence,
+                  analysedAt: surface.createdAt.toISOString(),
+                }
+              : null,
+            dna: (profile?.profile ?? null) as Record<string, unknown> | null,
+            variationCount: vars.length,
+            lastIntent: vars[0]?.intent ?? null,
+            climate: climate
+              ? { ...(climate.data as object), source: climate.source }
+              : null,
           }
         : null,
     };
@@ -541,6 +619,174 @@ export async function saveRecommendations(token: string, schemes: unknown[]) {
     id: `rec_${randomUUID()}`,
     projectId: ctx.projectId,
     schemes,
+  });
+  return { ok: true as const };
+}
+
+/* --------------------------- Round 2: intelligence ------------------------ */
+
+/**
+ * Persist a surface-health reading.
+ *
+ * One row per (project, image) by unique index — re-analysing the same
+ * photograph replaces the reading rather than appending a near-duplicate, which
+ * is what stops the dealer's alert list filling with the same wall five times.
+ * A whole-project analysis (imageId null) is stored the same way.
+ */
+export async function saveSurfaceAnalysis(
+  token: string,
+  report: {
+    engine: string;
+    observations: unknown[];
+    prep: unknown[];
+    severity: string;
+    confidence: string;
+  },
+  imageId?: string | null,
+) {
+  const ctx = await writableProject(token);
+  if (!ctx.ok) return ctx;
+  const db = await getDb();
+
+  const existing = await db.query.surfaceAnalyses.findMany({
+    where: eq(t.surfaceAnalyses.projectId, ctx.projectId),
+  });
+  const dupe = existing.find((r) => (r.imageId ?? null) === (imageId ?? null));
+
+  const values = {
+    projectId: ctx.projectId,
+    imageId: imageId ?? null,
+    engine: report.engine,
+    observations: report.observations,
+    prepPlan: report.prep,
+    severity: report.severity,
+    confidence: report.confidence,
+  };
+
+  if (dupe) {
+    await db
+      .update(t.surfaceAnalyses)
+      .set({ ...values, createdAt: new Date() })
+      .where(eq(t.surfaceAnalyses.id, dupe.id));
+    return { ok: true as const, id: dupe.id };
+  }
+
+  const id = `sa_${randomUUID()}`;
+  await db.insert(t.surfaceAnalyses).values({ id, ...values });
+  return { ok: true as const, id };
+}
+
+/**
+ * Append design signals and re-derive the profile.
+ *
+ * Signals are append-only and the profile is recomputed from the whole list
+ * every time, never patched incrementally. That costs a few milliseconds and
+ * buys the guarantee that the stored profile always equals what the current
+ * rules would produce from the stored evidence — so improving the rules fixes
+ * every existing profile instead of leaving a generation of stale ones behind.
+ *
+ * The list is capped. A customer who taps through forty schemes produces forty
+ * signals, and past a couple of hundred the tail contributes nothing to a
+ * recency-free tally while making every write larger.
+ */
+const MAX_SIGNALS = 200;
+
+export async function recordDesignSignals(
+  token: string,
+  incoming: unknown[],
+  derive: (signals: unknown[]) => Record<string, unknown>,
+) {
+  const ctx = await writableProject(token);
+  if (!ctx.ok) return ctx;
+  const db = await getDb();
+
+  const existing = await db.query.designProfiles.findFirst({
+    where: eq(t.designProfiles.sessionId, ctx.session.id),
+  });
+
+  const signals = [...((existing?.signals as unknown[]) ?? []), ...incoming].slice(-MAX_SIGNALS);
+  const profile = derive(signals);
+
+  if (existing) {
+    await db
+      .update(t.designProfiles)
+      .set({ signals, profile, updatedAt: new Date() })
+      .where(eq(t.designProfiles.id, existing.id));
+    return { ok: true as const, profile };
+  }
+
+  await db.insert(t.designProfiles).values({
+    id: `dp_${randomUUID()}`,
+    sessionId: ctx.session.id,
+    projectId: ctx.projectId,
+    signals,
+    profile,
+  });
+  return { ok: true as const, profile };
+}
+
+/** The raw evidence, for re-deriving a profile after a rules change. */
+export async function getDesignSignals(token: string): Promise<unknown[]> {
+  const session = await getSessionByToken(token);
+  if (!session) return [];
+  const db = await getDb();
+  const row = await db.query.designProfiles.findFirst({
+    where: eq(t.designProfiles.sessionId, session.id),
+  });
+  return (row?.signals as unknown[]) ?? [];
+}
+
+/** A What-If run, kept so the dealer sees which direction was explored. */
+export async function saveVariation(
+  token: string,
+  input: { intent: string; baseSpec: Record<string, unknown>; schemes: unknown[]; engine: string },
+) {
+  const ctx = await writableProject(token);
+  if (!ctx.ok) return ctx;
+  const db = await getDb();
+  await db.insert(t.designVariations).values({
+    id: `dv_${randomUUID()}`,
+    projectId: ctx.projectId,
+    intent: input.intent,
+    baseSpec: input.baseSpec,
+    schemes: input.schemes,
+    engine: input.engine,
+  });
+  return { ok: true as const };
+}
+
+/**
+ * The environmental context a recommendation was made under.
+ *
+ * One row per project, replaced rather than appended: the useful question is
+ * "what was assumed when this was designed", and a history of near-identical
+ * monthly normals answers nothing while growing without bound.
+ */
+export async function saveClimateContext(
+  token: string,
+  input: { city: string | null; source: string; data: Record<string, unknown> },
+) {
+  const ctx = await writableProject(token);
+  if (!ctx.ok) return ctx;
+  const db = await getDb();
+
+  const existing = await db.query.climateContexts.findFirst({
+    where: eq(t.climateContexts.projectId, ctx.projectId),
+  });
+  if (existing) {
+    await db
+      .update(t.climateContexts)
+      .set({ city: input.city, source: input.source, data: input.data, createdAt: new Date() })
+      .where(eq(t.climateContexts.id, existing.id));
+    return { ok: true as const };
+  }
+
+  await db.insert(t.climateContexts).values({
+    id: `cc_${randomUUID()}`,
+    projectId: ctx.projectId,
+    city: input.city,
+    source: input.source,
+    data: input.data,
   });
   return { ok: true as const };
 }

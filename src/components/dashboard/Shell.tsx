@@ -2,35 +2,61 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useDealerAccount } from "@/lib/account-client";
 import {
   Boxes,
+  CloudSun,
   LayoutGrid,
   LogOut,
   QrCode,
+  Radar,
   TrendingUp,
   Users,
 } from "lucide-react";
 import { LogoMark, Wordmark } from "@/components/brand/Logo";
-import { DEALER } from "@/lib/demo";
 import { cn } from "@/lib/utils";
 
+/**
+ * `short` exists for the mobile bar, where six labels have to fit across a
+ * phone. Taking the first word works for "Customer links" and fails for
+ * "Intelligence", so the short form is stated rather than derived.
+ */
 export const NAV = [
-  { href: "/dashboard", label: "Overview", icon: LayoutGrid },
-  { href: "/dashboard/inventory", label: "Inventory", icon: Boxes },
-  { href: "/dashboard/customers", label: "Customers", icon: Users },
-  { href: "/dashboard/qr", label: "Customer links", icon: QrCode },
-  { href: "/dashboard/performance", label: "Performance", icon: TrendingUp },
+  { href: "/dashboard", label: "Overview", short: "Overview", icon: LayoutGrid },
+  { href: "/dashboard/inventory", label: "Inventory", short: "Stock", icon: Boxes },
+  { href: "/dashboard/customers", label: "Customers", short: "Customers", icon: Users },
+  { href: "/dashboard/qr", label: "Customer links", short: "Links", icon: QrCode },
+  // Inference, kept apart from Performance. Performance is the ledger; this is
+  // what the ledger has not happened yet.
+  { href: "/dashboard/intelligence", label: "Intelligence", short: "Radar", icon: Radar },
+  { href: "/dashboard/performance", label: "Performance", short: "Sales", icon: TrendingUp },
 ];
 
 /**
  * Console shell.
  *
- * A rail, not a drawer: five destinations is few enough that hiding them behind
- * a hamburger costs a tap for nothing. On mobile the same five collapse into a
+ * A rail, not a drawer: six destinations is few enough that hiding them behind
+ * a hamburger costs a tap for nothing. On mobile the same six collapse into a
  * bottom bar, which is where a thumb already is on a counter phone.
  */
+/** Two letters for the avatar; a blank name must not render an empty circle. */
+function initials(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "RA";
+  return (parts[0][0] + (parts[1]?.[0] ?? "")).toUpperCase();
+}
+
 export function Shell({ children }: { children: React.ReactNode }) {
   const path = usePathname();
+  // One shared source for the signed-in dealer. No demo-constant fallback:
+  // rendering another shop's name while this one loads is the bug this page
+  // existed to demonstrate.
+  const { account, climate } = useDealerAccount();
+
+  const signOut = async () => {
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+    window.location.href = "/login";
+  };
 
   return (
     <div className="min-h-[100svh] bg-ink-900">
@@ -68,16 +94,22 @@ export function Shell({ children }: { children: React.ReactNode }) {
         </nav>
 
         <div className="mt-auto rounded-2xl border border-[color-mix(in_oklab,var(--color-paper-200)_10%,transparent)] p-4">
-          <p className="text-[0.8125rem] text-paper-100">{DEALER.name}</p>
+          <p className="text-[0.8125rem] text-paper-100">{account?.name ?? "—"}</p>
           <p className="data mt-1 text-[0.625rem] tracking-[0.1em] text-paper-400 uppercase">
-            {DEALER.city} · {DEALER.tier} plan
+            {account ? `${account.city} · ${account.tier} plan` : "Loading…"}
           </p>
-          <Link
-            href="/login"
+          {account?.phone && (
+            <p className="data mt-1 text-[0.625rem] text-paper-400">{account.phone}</p>
+          )}
+          {/* A real sign-out: it clears the cookie server-side. A link to
+              /login would leave the session intact and the console reachable
+              by pressing Back. */}
+          <button
+            onClick={signOut}
             className="mt-3 inline-flex items-center gap-2 text-[0.75rem] text-paper-400 transition-colors hover:text-paper-50"
           >
             <LogOut className="h-3.5 w-3.5" strokeWidth={1.6} /> Sign out
-          </Link>
+          </button>
         </div>
       </aside>
 
@@ -89,14 +121,23 @@ export function Shell({ children }: { children: React.ReactNode }) {
             <Wordmark />
           </Link>
           <p className="hidden text-[0.8125rem] text-paper-400 lg:block">
-            Demo workspace · every figure below is synthetic
+            {account ? `${account.owner} · ${account.name}` : "Loading your shop…"}
           </p>
           <div className="flex items-center gap-3">
-            <span className="data hidden rounded-full border border-[color-mix(in_oklab,var(--color-paper-200)_14%,transparent)] px-3 py-1.5 text-[0.625rem] tracking-[0.12em] text-paper-300 uppercase sm:inline-flex">
-              16 Aug · Kanpur · 34°C
-            </span>
+            {/* Live where we have coordinates, and it says which. A badge that
+                reads "34°C" without saying whether that is now or a monthly
+                average is the kind of number a dealer plans a job around. */}
+            {climate && (
+              <span className="data hidden items-center gap-2 rounded-full border border-[color-mix(in_oklab,var(--color-paper-200)_14%,transparent)] px-3 py-1.5 text-[0.625rem] tracking-[0.12em] text-paper-300 uppercase sm:inline-flex">
+                <CloudSun className="h-3.5 w-3.5" strokeWidth={1.6} />
+                {climate.city} · {climate.tempC}°C · {climate.humidityPct}%
+                <span className={climate.live ? "text-[#5fbfb3]" : "text-[#e0bd72]"}>
+                  {climate.live ? "live" : "typical"}
+                </span>
+              </span>
+            )}
             <span className="flex h-8 w-8 items-center justify-center rounded-full bg-pigment text-[0.75rem] font-medium text-white">
-              RS
+              {initials(account?.owner ?? account?.name ?? "")}
             </span>
           </div>
         </header>
@@ -114,12 +155,12 @@ export function Shell({ children }: { children: React.ReactNode }) {
               key={item.href}
               href={item.href}
               className={cn(
-                "flex flex-1 flex-col items-center gap-1 py-2.5 text-[0.5625rem] tracking-[0.06em] uppercase transition-colors",
+                "flex min-w-0 flex-1 flex-col items-center gap-1 py-2.5 text-[0.5625rem] tracking-[0.06em] uppercase transition-colors",
                 on ? "text-pigment" : "text-paper-400",
               )}
             >
               <Icon className="h-[1.15rem] w-[1.15rem]" strokeWidth={1.6} />
-              {item.label.split(" ")[0]}
+              <span className="max-w-full truncate">{item.short}</span>
             </Link>
           );
         })}

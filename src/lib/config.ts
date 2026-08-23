@@ -25,7 +25,14 @@ export const ACCEPTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "i
  * rather than letting a dealer print a dead code.
  */
 export function publicAppUrl(requestOrigin?: string) {
-  const configured = process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "");
+  // APP_URL is checked first and is read at RUNTIME. Anything named
+  // NEXT_PUBLIC_* is substituted into the bundle at build time, so changing it
+  // requires a full rebuild — unworkable for a tunnel URL that changes every
+  // time the tunnel restarts. NEXT_PUBLIC_APP_URL stays supported as a fallback
+  // for hosts where it is the natural place to configure this.
+  const configured = (process.env.APP_URL ?? process.env.NEXT_PUBLIC_APP_URL)
+    ?.trim()
+    .replace(/\/$/, "");
   if (configured) return configured;
   return (requestOrigin ?? "http://localhost:3000").replace(/\/$/, "");
 }
