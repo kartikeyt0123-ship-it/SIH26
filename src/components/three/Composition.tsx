@@ -352,39 +352,111 @@ export function Composition({ lowPower = false }: { lowPower?: boolean }) {
 
         <group ref={props}>
           {/* window — the only light source the room admits, and the reason
-              the customer's photo never matches the shade card */}
+              the customer's photo never matches the shade card. Framed and
+              mullioned rather than a bright rectangle: the bars are what make
+              an opening read as glazing rather than a hole. */}
           <mesh position={[-1.55, 0.35, -1.97]}>
             <planeGeometry args={[1.9, 1.7]} />
-            <meshBasicMaterial color="#f3ead9" toneMapped={false} />
+            <meshBasicMaterial color="#f6efe1" toneMapped={false} />
           </mesh>
           <mesh position={[-1.55, 0.35, -1.94]}>
-            <planeGeometry args={[0.05, 1.7]} />
-            <meshBasicMaterial color="#2a2a2c" />
+            <boxGeometry args={[0.055, 1.7, 0.03]} />
+            <meshStandardMaterial color="#efeae0" roughness={0.4} />
           </mesh>
           <mesh position={[-1.55, 0.35, -1.94]}>
-            <planeGeometry args={[1.9, 0.05]} />
-            <meshBasicMaterial color="#2a2a2c" />
+            <boxGeometry args={[1.9, 0.055, 0.03]} />
+            <meshStandardMaterial color="#efeae0" roughness={0.4} />
+          </mesh>
+          {/* frame + sill */}
+          {(
+            [
+              [0, 0.9, 2.02, 0.09],
+              [0, -0.2, 2.02, 0.09],
+            ] as const
+          ).map(([dx, dy, w, h]) => (
+            <mesh key={`${dx}-${dy}`} position={[-1.55 + dx, 0.35 + dy, -1.93]} castShadow>
+              <boxGeometry args={[w, h, 0.05]} />
+              <meshStandardMaterial color="#efeae0" roughness={0.4} />
+            </mesh>
+          ))}
+          <mesh position={[-1.55, -0.58, -1.85]} castShadow receiveShadow>
+            <boxGeometry args={[2.1, 0.07, 0.22]} />
+            <meshStandardMaterial color="#efeae0" roughness={0.42} />
           </mesh>
 
           {/* skirting */}
-          <mesh position={[0, -1.58, -1.93]}>
+          <mesh position={[0, -1.58, -1.93]} castShadow receiveShadow>
             <boxGeometry args={[7.2, 0.18, 0.06]} />
             <meshStandardMaterial color="#efeae0" roughness={0.5} />
           </mesh>
 
-          {/* a low seat and a rug: scale cues, so the walls read as walls */}
-          <mesh position={[-1.2, -1.26, -0.55]}>
-            <boxGeometry args={[2.3, 0.72, 0.9]} />
-            <meshStandardMaterial color="#6f6558" roughness={0.9} />
+          {/* rug first, so the furniture sits ON something */}
+          <mesh position={[-0.6, -1.63, -0.2]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+            <planeGeometry args={[4.0, 2.6]} />
+            <meshStandardMaterial color="#6b5a4a" roughness={1} />
           </mesh>
-          <mesh position={[-1.2, -0.78, -0.9]}>
-            <boxGeometry args={[2.3, 0.5, 0.24]} />
-            <meshStandardMaterial color="#7d7264" roughness={0.9} />
-          </mesh>
-          <mesh position={[0.5, -1.6, 0.35]} rotation={[-Math.PI / 2, 0, 0]}>
-            <planeGeometry args={[3.2, 2.0]} />
-            <meshStandardMaterial color="#54463c" roughness={1} />
-          </mesh>
+
+          {/* sofa: base, back, arms and cushions rather than two slabs */}
+          <group position={[-1.2, -1.62, -0.55]}>
+            <mesh position={[0, 0.34, 0]} castShadow receiveShadow>
+              <boxGeometry args={[2.3, 0.38, 0.92]} />
+              <meshStandardMaterial color="#7d7263" roughness={0.94} />
+            </mesh>
+            <mesh position={[0, 0.72, -0.38]} castShadow receiveShadow>
+              <boxGeometry args={[2.3, 0.5, 0.17]} />
+              <meshStandardMaterial color="#877b6b" roughness={0.94} />
+            </mesh>
+            {[-0.55, 0.55].map((dx) => (
+              <mesh key={dx} position={[dx, 0.58, 0.02]} castShadow>
+                <boxGeometry args={[1.06, 0.15, 0.78]} />
+                <meshStandardMaterial color="#6f6558" roughness={0.95} />
+              </mesh>
+            ))}
+            {[-1.2, 1.2].map((dx) => (
+              <mesh key={dx} position={[dx, 0.5, 0]} castShadow receiveShadow>
+                <boxGeometry args={[0.16, 0.7, 0.92]} />
+                <meshStandardMaterial color="#6b6154" roughness={0.94} />
+              </mesh>
+            ))}
+          </group>
+
+          {/* low table, so the rug is not an empty field */}
+          <group position={[0.75, -1.62, 0.15]}>
+            <mesh position={[0, 0.42, 0]} castShadow receiveShadow>
+              <boxGeometry args={[1.1, 0.06, 0.6]} />
+              <meshStandardMaterial color="#6b4f34" roughness={0.5} />
+            </mesh>
+            {[
+              [-0.48, -0.22],
+              [0.48, -0.22],
+              [-0.48, 0.22],
+              [0.48, 0.22],
+            ].map(([dx, dz]) => (
+              <mesh key={`${dx}-${dz}`} position={[dx, 0.2, dz]} castShadow>
+                <cylinderGeometry args={[0.026, 0.026, 0.4, 8]} />
+                <meshStandardMaterial color="#4f3a26" roughness={0.6} />
+              </mesh>
+            ))}
+          </group>
+
+          {/* a plant by the window, for depth against the light */}
+          <group position={[-2.85, -1.62, -1.1]}>
+            <mesh position={[0, 0.2, 0]} castShadow receiveShadow>
+              <cylinderGeometry args={[0.18, 0.14, 0.4, 12]} />
+              <meshStandardMaterial color="#9b7550" roughness={0.78} />
+            </mesh>
+            {[0, 1, 2, 3].map((i) => (
+              <mesh
+                key={i}
+                position={[Math.cos(i * 1.6) * 0.13, 0.66 + (i % 2) * 0.16, Math.sin(i * 1.6) * 0.13]}
+                rotation={[0.4, i * 1.6, 0.25]}
+                castShadow
+              >
+                <sphereGeometry args={[0.19, 8, 6]} />
+                <meshStandardMaterial color={i % 2 ? "#3f6b46" : "#4d7d51"} roughness={0.92} />
+              </mesh>
+            ))}
+          </group>
         </group>
 
         {/* the reading sweep */}
@@ -399,10 +471,30 @@ export function Composition({ lowPower = false }: { lowPower?: boolean }) {
         <meshStandardMaterial roughness={0.45} metalness={0.06} />
       </instancedMesh>
 
-      <ambientLight intensity={0.42} />
+      {/* Ambient kept low so the shadow gradients survive — a flat fill is what
+          made this read as flat panels rather than a room. */}
+      <ambientLight intensity={0.3} />
+      <hemisphereLight args={["#fff1e0", "#5a4a3c", 0.4]} />
       <pointLight ref={glow} position={[-1.55, 0.35, -1.4]} intensity={3.2} color="#ffe9cc" distance={9} />
-      <directionalLight position={[3.5, 4.5, 4]} intensity={1.5} color="#fff6ec" />
-      <directionalLight position={[-4, 1, 3]} intensity={0.5} color="#7f9dc4" />
+      {/* One shadow caster, from roughly where the window is. Two would double
+          the cost for a difference nobody scrolling past would notice. */}
+      <directionalLight
+        castShadow
+        position={[-2.6, 3.6, 2.4]}
+        intensity={1.55}
+        color="#fff6ec"
+        shadow-mapSize-width={lowPower ? 512 : 1024}
+        shadow-mapSize-height={lowPower ? 512 : 1024}
+        shadow-camera-near={0.5}
+        shadow-camera-far={18}
+        shadow-camera-left={-6}
+        shadow-camera-right={6}
+        shadow-camera-top={5}
+        shadow-camera-bottom={-5}
+        shadow-bias={-0.0015}
+      />
+      <directionalLight position={[3.5, 2.5, 4]} intensity={0.6} color="#fff6ec" />
+      <directionalLight position={[-4, 1, 3]} intensity={0.42} color="#7f9dc4" />
 
       {/* No HDR fetch — the environment is emissive planes, so the scene
           renders identically offline and costs nothing over the wire. */}

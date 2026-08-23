@@ -1,14 +1,30 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check, FileText, MessageCircle, Ruler, Send } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  Download,
+  FileText,
+  Loader2,
+  MessageCircle,
+  Ruler,
+  Send,
+  Share2,
+} from "lucide-react";
 import { CategoryChip, PageHead, Panel, PanelHead, Tag } from "@/components/dashboard/ui";
 import { LINE_BY_ID } from "@/lib/catalog";
 import { buildQuote } from "@/lib/quote";
 import type { CustomerSpec } from "@/lib/recommend";
 import type { Measurements, SelectedScheme, SessionDTO } from "@/lib/session-types";
 import { createQuotation, useDealerSessions } from "@/lib/store";
-import { quotationMessage, waLink } from "@/lib/whatsapp";
+import { quotationMessage } from "@/lib/whatsapp";
+import {
+  downloadQuotation,
+  sendQuotationTo,
+  shareQuotation,
+  type ShareOutcome,
+} from "@/lib/pdf-share";
 import { cn, inr } from "@/lib/utils";
 
 /**
@@ -471,53 +487,116 @@ function Delivery({
   total: number;
   itemCount: number;
 }) {
-  const [origin, setOrigin] = useState("");
-  useEffect(() => setOrigin(window.location.origin), []);
+  const [busy, setBusy] = useState<"share" | "attach" | "download" | null>(null);
+  const [outcome, setOutcome] = useState<ShareOutcome | "opened" | "opened-nofile" | null>(null);
 
-  const pdfUrl = `${origin}/api/quotations/${quotationId}/pdf`;
-  const wa = waLink(
-    phone,
-    quotationMessage({
-      customerName,
-      dealerName: "your dealer",
-      total,
-      pdfUrl,
-      itemCount,
-    }),
-  );
+  // No PDF URL in the message. The file itself is what gets sent, so the
+  // customer keeps a document that works long after this server has gone.
+  const message = quotationMessage({ customerName, dealerName: "your dealer", total, itemCount });
+
+  /**
+   * Straight to this customer's chat.
+   *
+   * Downloads the PDF, then opens their conversation with the message written.
+   * No contact search — the number is already in the link.
+   */
+  const onSend = async () => {
+    setBusy("share");
+    setOutcome(null);
+    const r = await sendQuotationTo(quotationId, customerName, phone, message);
+    setOutcome(r.outcome === "opened" ? (r.downloaded ? "opened" : "opened-nofile") : "failed");
+    setBusy(null);
+  };
+
+  /** Attach the file through the share sheet, for phones that support it. */
+  const onShareFile = async () => {
+    setBusy("attach");
+    setOutcome(null);
+    setOutcome(await shareQuotation(quotationId, customerName, message));
+    setBusy(null);
+  };
+
+  const onDownload = async () => {
+    setBusy("download");
+    const ok = await downloadQuotation(quotationId, customerName);
+    setOutcome(ok ? "downloaded" : "failed");
+    setBusy(null);
+  };
 
   return (
     <div className="mt-5 border-t border-[color-mix(in_oklab,var(--color-paper-200)_10%,transparent)] pt-5">
       <p className="eyebrow mb-3">Send it to them</p>
       <div className="flex flex-wrap gap-2.5">
-        <a
-          href={`/api/quotations/${quotationId}/pdf`}
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex items-center gap-2 rounded-full border border-[color-mix(in_oklab,var(--color-paper-200)_18%,transparent)] px-4 py-2.5 text-[0.8125rem] text-paper-100 transition-colors hover:border-pigment hover:text-paper-50"
+        <button
+          onClick={onDownload}
+          disabled={busy !== null}
+          className="inline-flex items-center gap-2 rounded-full border border-[color-mix(in_oklab,var(--color-paper-200)_18%,transparent)] px-4 py-2.5 text-[0.8125rem] text-paper-100 transition-colors hover:border-pigment hover:text-paper-50 disabled:opacity-60"
         >
-          <FileText className="h-4 w-4" strokeWidth={1.7} /> Open PDF
-        </a>
+          {busy === "download" ? (
+            <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2} />
+          ) : (
+            <Download className="h-4 w-4" strokeWidth={1.7} />
+          )}
+          Download PDF
+        </button>
 
-        {wa ? (
-          <a
-            href={wa}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-2 rounded-full bg-[#25D366] px-4 py-2.5 text-[0.8125rem] font-medium text-[#04310f] transition-transform hover:-translate-y-px"
-          >
-            <MessageCircle className="h-4 w-4" strokeWidth={2} /> Open in WhatsApp
-          </a>
+        {phone ? (
+          <>
+            <button
+              onClick={onSend}
+              disabled={busy !== null}
+              className="inline-flex items-center gap-2 rounded-full bg-[#25D366] px-4 py-2.5 text-[0.8125rem] font-medium text-[#04310f] transition-transform hover:-translate-y-px disabled:opacity-60"
+            >
+              {busy === "share" ? (
+                <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2} />
+              ) : (
+                <MessageCircle className="h-4 w-4" strokeWidth={2} />
+              )}
+              WhatsApp {customerName.split(" ")[0]}
+            </button>
+            <button
+              onClick={onShareFile}
+              disabled={busy !== null}
+              className="inline-flex items-center gap-2 rounded-full border border-[color-mix(in_oklab,var(--color-paper-200)_18%,transparent)] px-4 py-2.5 text-[0.8125rem] text-paper-100 transition-colors hover:border-pigment disabled:opacity-60"
+            >
+              {busy === "attach" ? (
+                <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2} />
+              ) : (
+                <Share2 className="h-4 w-4" strokeWidth={1.7} />
+              )}
+              Attach file…
+            </button>
+          </>
         ) : (
           <span className="inline-flex items-center gap-2 rounded-full border border-[color-mix(in_oklab,var(--color-paper-200)_14%,transparent)] px-4 py-2.5 text-[0.8125rem] text-paper-400">
             <MessageCircle className="h-4 w-4" strokeWidth={1.7} /> No mobile number on file
           </span>
         )}
+
+        <a
+          href={`/api/quotations/${quotationId}/pdf`}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-2 rounded-full px-3 py-2.5 text-[0.8125rem] text-paper-400 transition-colors hover:text-paper-100"
+        >
+          <FileText className="h-4 w-4" strokeWidth={1.7} /> Preview
+        </a>
       </div>
+
       <p className="mt-2.5 text-[0.75rem] leading-relaxed text-paper-400">
-        {wa
-          ? "WhatsApp opens with the message and the PDF link ready — you press send. We cannot check whether this number is on WhatsApp until you try."
-          : "Ask the customer for a mobile number on their next visit and it will appear here."}
+        {outcome === "opened"
+          ? `${customerName.split(" ")[0]}'s chat is open with the message written, and the PDF has downloaded to this device — tap the paperclip to attach it, then send.`
+          : outcome === "opened-nofile"
+            ? "Their chat is open, but the PDF did not download. Use Download PDF and attach it."
+            : outcome === "shared"
+              ? "Handed to the app you picked with the PDF attached. You press send there."
+              : outcome === "downloaded"
+                ? "The PDF is on this device, ready to attach."
+                : outcome === "failed"
+                  ? "Could not build the PDF. Try again, or use Preview."
+                  : phone
+                    ? `Opens ${customerName.split(" ")[0]}'s own chat directly — no searching for the contact — and downloads the PDF so you can attach it. The file works offline for ever, unlike a link. Nothing is sent until you press send.`
+                    : "Ask the customer for a mobile number on their next visit and it will appear here."}
       </p>
     </div>
   );

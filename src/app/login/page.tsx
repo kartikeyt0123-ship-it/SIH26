@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/Button";
@@ -37,6 +37,24 @@ function LoginForm() {
   const [sent, setSent] = useState<{ channel: string; code?: string; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Every registered shop, so an account created through sign-up can be opened
+  // again without anyone remembering which number they used. Only ever
+  // populated while open login is on — see /api/auth/accounts.
+  const [accounts, setAccounts] = useState<
+    { name: string; owner: string; city: string; phone: string; display: string }[]
+  >([]);
+  const [openMode, setOpenMode] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/auth/accounts", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((j) => {
+        setAccounts(j.accounts ?? []);
+        setOpenMode(Boolean(j.openLogin));
+      })
+      .catch(() => undefined);
+  }, []);
 
   const post = async (url: string, body: unknown) => {
     const res = await fetch(url, {
@@ -132,13 +150,20 @@ function LoginForm() {
         </Field>
 
         {mode === "password" ? (
-          <Field label="Password">
+          <Field
+            label={openMode ? "Password (not checked)" : "Password"}
+            hint={
+              openMode
+                ? "Demo mode: accounts are matched on the mobile number alone, so anything here will do."
+                : undefined
+            }
+          >
             <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className={inputClass}
-              placeholder="••••••••"
+              placeholder={openMode ? "anything" : "••••••••"}
             />
           </Field>
         ) : (
@@ -190,26 +215,47 @@ function LoginForm() {
         )}
       </form>
 
-      <div className="mt-9 rounded-2xl border border-[color-mix(in_oklab,var(--color-paper-200)_12%,transparent)] p-4">
-        <p className="eyebrow">Demo account</p>
-        <p className="mt-2 text-[0.875rem] text-paper-200">
-          Sharma Interiors &amp; Hardware · Kanpur
-        </p>
-        <p className="data mt-2 text-[0.8125rem] text-paper-100">
-          98765 43210 · rachna123
-        </p>
-        <button
-          type="button"
-          onClick={() => {
-            setMode("password");
-            setPhone("9876543210");
-            setPassword("rachna123");
-          }}
-          className="mt-3 text-[0.75rem] text-paper-400 underline underline-offset-4 transition-colors hover:text-paper-100"
-        >
-          Fill these in
-        </button>
-      </div>
+      {accounts.length > 0 && (
+        <div className="mt-9 rounded-2xl border border-[color-mix(in_oklab,var(--color-paper-200)_12%,transparent)] p-4">
+          <p className="eyebrow">Registered accounts on this build</p>
+          <p className="mt-1.5 text-[0.75rem] leading-relaxed text-paper-400">
+            Tap one to sign straight back in. Any account you create through sign-up appears here
+            too.
+          </p>
+          <div className="mt-3 flex flex-col gap-1.5">
+            {accounts.map((a) => (
+              <button
+                key={a.phone}
+                type="button"
+                onClick={() => {
+                  setMode("password");
+                  setPhone(a.phone);
+                  setPassword("demo");
+                  setError(null);
+                }}
+                className="flex items-center gap-3 rounded-xl border border-[color-mix(in_oklab,var(--color-paper-200)_10%,transparent)] px-3 py-2.5 text-left transition-colors hover:border-[color-mix(in_oklab,var(--color-pigment)_45%,transparent)]"
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[0.8125rem] text-paper-100">{a.name}</span>
+                  <span className="data block truncate text-[0.625rem] tracking-[0.08em] text-paper-400 uppercase">
+                    {a.city} · {a.display}
+                  </span>
+                </span>
+                <span className="data shrink-0 text-[0.625rem] tracking-[0.1em] text-pigment-soft uppercase">
+                  use
+                </span>
+              </button>
+            ))}
+          </div>
+          {/* Said out loud rather than buried. With this on, a phone number is
+              the whole credential, and anyone reading this list has them all. */}
+          <p className="mt-3 text-[0.6875rem] leading-relaxed text-[#e0bd72]">
+            Demo build: sign-in matches on the mobile number only and the password is ignored. Set
+            STRICT_LOGIN=1 to require a real password before this is in front of anyone&apos;s
+            customers.
+          </p>
+        </div>
+      )}
     </AuthShell>
   );
 }

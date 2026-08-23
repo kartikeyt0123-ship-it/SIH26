@@ -1386,7 +1386,15 @@ function ColourStep(props: {
       </p>
 
       <div className="relative mt-5 aspect-[4/5] overflow-hidden rounded-2xl border border-[color-mix(in_oklab,var(--color-paper-200)_12%,transparent)] sm:aspect-[4/3]">
-        <RoomViewer room={room} colors={colors} className="h-full w-full" />
+        {/* The room type decides the furniture — a bedroom gets a bed, not a
+            sofa. Colour is judged against the objects that will actually be in
+            front of the wall. */}
+        <RoomViewer
+          room={room}
+          colors={colors}
+          roomType={spec.roomType}
+          className="h-full w-full"
+        />
         <span className="data pointer-events-none absolute bottom-3 left-3 rounded-full bg-ink-900/70 px-3 py-1.5 text-[0.5625rem] tracking-[0.12em] text-paper-300 uppercase">
           Reconstruction · drag to look around
         </span>

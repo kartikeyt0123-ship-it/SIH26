@@ -170,18 +170,42 @@ export async function signup(input: SignupInput) {
   return { ok: true as const, dealerId: id };
 }
 
+/**
+ * Demo mode: the account is identified by phone number, and the password is
+ * not checked.
+ *
+ * BE CLEAR ABOUT WHAT THIS IS. With this on, anyone who knows a registered
+ * mobile number can open that dealer's console and read every one of their
+ * customers' photographs, phone numbers and quotations. It is not a weaker
+ * password policy — it is no authentication at all on the password path.
+ *
+ * It exists because a walkthrough should not stall on a forgotten password, and
+ * it is deliberately a single environment variable so turning it off is one
+ * line and no code change. Set STRICT_LOGIN=1 before this is in front of
+ * anyone's real customers.
+ */
+export const openLogin = () => process.env.STRICT_LOGIN?.trim() !== "1";
+
 export async function loginWithPassword(phoneRaw: string, password: string) {
   const phone = normalisePhone(phoneRaw);
   if (!phone) return { ok: false as const, error: "invalid_phone" };
 
   const db = await getDb();
   const dealer = await db.query.dealers.findFirst({ where: eq(t.dealers.phone, phone) });
+
+  // The number alone has to resolve to a real account either way — an unknown
+  // number is still a failure, so this cannot be used to create a session for
+  // a shop that does not exist.
+  if (!dealer) return { ok: false as const, error: "bad_credentials" };
+
+  if (openLogin()) return { ok: true as const, dealerId: dealer.id, passwordChecked: false };
+
   // One message for "no such number" and "wrong password". Distinguishing them
   // turns the login form into a tool for discovering which shops are registered.
-  if (!dealer || !(await verifySecret(password, dealer.passwordHash))) {
+  if (!(await verifySecret(password, dealer.passwordHash))) {
     return { ok: false as const, error: "bad_credentials" };
   }
-  return { ok: true as const, dealerId: dealer.id };
+  return { ok: true as const, dealerId: dealer.id, passwordChecked: true };
 }
 
 export async function loginWithOtp(phoneRaw: string, code: string) {

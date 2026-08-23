@@ -1,5 +1,12 @@
 import { NextResponse } from "next/server";
-import { COOKIE, cookieOptions, issueCookie, loginWithOtp, loginWithPassword } from "@/server/auth";
+import {
+  COOKIE,
+  cookieOptions,
+  issueCookie,
+  loginWithOtp,
+  loginWithPassword,
+  openLogin,
+} from "@/server/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,7 +34,13 @@ export async function POST(req: Request) {
     );
   }
 
-  const res = NextResponse.json({ ok: true, dealerId: result.dealerId });
+  // Reported so the screen can say plainly that the password was not checked,
+  // rather than implying an authentication that did not happen.
+  const res = NextResponse.json({
+    ok: true,
+    dealerId: result.dealerId,
+    passwordChecked: !openLogin(),
+  });
   res.cookies.set(COOKIE, await issueCookie(result.dealerId), cookieOptions);
   return res;
 }
@@ -37,7 +50,9 @@ const MESSAGES: Record<string, string> = {
   // Deliberately identical for a wrong password and an unknown number: telling
   // them apart turns this form into a way to discover which shops are on the
   // platform.
-  bad_credentials: "That number and password do not match.",
+  bad_credentials: openLogin()
+    ? "No account is registered to that number."
+    : "That number and password do not match.",
   no_account: "No account found for that number.",
   no_code: "Request a code first.",
   expired: "That code has expired. Ask for a new one.",

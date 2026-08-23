@@ -33,25 +33,34 @@ export function waLink(phone: string | null | undefined, message: string): strin
 
 /* ------------------------------- messages -------------------------------- */
 
+/**
+ * The message that travels WITH the PDF.
+ *
+ * Deliberately carries no link. The quotation is sent as an attached file, so
+ * the customer keeps a document that opens for ever on their own phone — a URL
+ * would only work while this server happened to be reachable, which for a
+ * tunnelled build is minutes. `pdfUrl` is accepted for the rare case where a
+ * link genuinely is the payload, and omitted everywhere else.
+ */
 export function quotationMessage(input: {
   customerName: string;
   dealerName: string;
   total: number;
-  pdfUrl: string;
   itemCount: number;
+  pdfUrl?: string;
 }) {
   const total = `Rs. ${Math.round(input.total).toLocaleString("en-IN")}`;
-  return [
+  const lines = [
     `Namaste ${input.customerName.split(" ")[0]},`,
     ``,
-    `Your quotation from ${input.dealerName} is ready.`,
+    `Your quotation from ${input.dealerName} is attached.`,
     `${input.itemCount} items, materials only — ${total}.`,
     ``,
-    `Full breakdown with every measurement and rate:`,
-    input.pdfUrl,
-    ``,
-    `Do tell us if you would like anything changed.`,
-  ].join("\n");
+    `Every line shows the area, coats and rate it was worked out from, so you can check the sum.`,
+  ];
+  if (input.pdfUrl) lines.push(``, input.pdfUrl);
+  lines.push(``, `Do tell us if you would like anything changed.`);
+  return lines.join("\n");
 }
 
 export function followUpMessage(input: {
