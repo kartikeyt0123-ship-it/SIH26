@@ -20,9 +20,12 @@ import type { Measurements, SelectedScheme, SessionDTO } from "@/lib/session-typ
 import { createQuotation, useDealerSessions } from "@/lib/store";
 import { quotationMessage } from "@/lib/whatsapp";
 import {
+  canShareFiles,
   downloadQuotation,
+  openChatWith,
+  prefetchQuotation,
   sendQuotationTo,
-  shareQuotation,
+  whatsappTextLink,
   type ShareOutcome,
 } from "@/lib/pdf-share";
 import { cn, inr } from "@/lib/utils";
@@ -487,33 +490,39 @@ function Delivery({
   total: number;
   itemCount: number;
 }) {
-  const [busy, setBusy] = useState<"share" | "attach" | "download" | null>(null);
-  const [outcome, setOutcome] = useState<ShareOutcome | "opened" | "opened-nofile" | null>(null);
+  const [busy, setBusy] = useState<"share" | "download" | null>(null);
+  const [outcome, setOutcome] = useState<
+    ShareOutcome | "opened" | "opened-nofile" | "blocked" | "no-number" | null
+  >(null);
 
   // No PDF URL in the message. The file itself is what gets sent, so the
   // customer keeps a document that works long after this server has gone.
   const message = quotationMessage({ customerName, dealerName: "your dealer", total, itemCount });
 
-  /**
-   * Straight to this customer's chat.
-   *
-   * Downloads the PDF, then opens their conversation with the message written.
-   * No contact search — the number is already in the link.
-   */
+  // Pulled as soon as a quotation exists, so the first tap opens the share
+  // sheet with no wait — browsers only allow it inside the gesture itself.
+  useEffect(() => {
+    prefetchQuotation(quotationId, customerName);
+  }, [quotationId, customerName]);
+
+  const attaches = canShareFiles();
+  const chatLink = whatsappTextLink(phone, message);
+
+  /** Message plus the PDF itself, in one action. */
   const onSend = async () => {
     setBusy("share");
     setOutcome(null);
     const r = await sendQuotationTo(quotationId, customerName, phone, message);
-    setOutcome(r.outcome === "opened" ? (r.downloaded ? "opened" : "opened-nofile") : "failed");
+    setOutcome(
+      r.outcome === "opened" ? (r.downloaded ? "opened" : "opened-nofile") : r.outcome,
+    );
     setBusy(null);
   };
 
-  /** Attach the file through the share sheet, for phones that support it. */
-  const onShareFile = async () => {
-    setBusy("attach");
-    setOutcome(null);
-    setOutcome(await shareQuotation(quotationId, customerName, message));
-    setBusy(null);
+  /** Their chat, message only — for a quick word without the document. */
+  const onChat = () => {
+    openChatWith(phone, message);
+    setOutcome("opened-nofile");
   };
 
   const onDownload = async () => {
@@ -549,22 +558,20 @@ function Delivery({
             >
               {busy === "share" ? (
                 <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2} />
+              ) : attaches ? (
+                <Share2 className="h-4 w-4" strokeWidth={2} />
               ) : (
                 <MessageCircle className="h-4 w-4" strokeWidth={2} />
               )}
-              WhatsApp {customerName.split(" ")[0]}
+              Send quotation + PDF
             </button>
             <button
-              onClick={onShareFile}
+              onClick={onChat}
               disabled={busy !== null}
               className="inline-flex items-center gap-2 rounded-full border border-[color-mix(in_oklab,var(--color-paper-200)_18%,transparent)] px-4 py-2.5 text-[0.8125rem] text-paper-100 transition-colors hover:border-pigment disabled:opacity-60"
             >
-              {busy === "attach" ? (
-                <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2} />
-              ) : (
-                <Share2 className="h-4 w-4" strokeWidth={1.7} />
-              )}
-              Attach file…
+              <MessageCircle className="h-4 w-4" strokeWidth={1.7} />
+              Just message {customerName.split(" ")[0]}
             </button>
           </>
         ) : (
@@ -583,20 +590,39 @@ function Delivery({
         </a>
       </div>
 
+      {/* A blocked popup is the one case where the dealer needs something to
+          click. An anchor is never blocked, so the action stays reachable
+          instead of the button appearing to do nothing. */}
+      {outcome === "blocked" && chatLink && (
+        <a
+          href={chatLink}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-3 inline-flex items-center gap-2 rounded-full bg-[#25D366] px-4 py-2.5 text-[0.8125rem] font-medium text-[#04310f]"
+        >
+          <MessageCircle className="h-4 w-4" strokeWidth={2} />
+          Open {customerName.split(" ")[0]}&apos;s chat
+        </a>
+      )}
+
       <p className="mt-2.5 text-[0.75rem] leading-relaxed text-paper-400">
-        {outcome === "opened"
-          ? `${customerName.split(" ")[0]}'s chat is open with the message written, and the PDF has downloaded to this device — tap the paperclip to attach it, then send.`
-          : outcome === "opened-nofile"
-            ? "Their chat is open, but the PDF did not download. Use Download PDF and attach it."
-            : outcome === "shared"
-              ? "Handed to the app you picked with the PDF attached. You press send there."
-              : outcome === "downloaded"
-                ? "The PDF is on this device, ready to attach."
-                : outcome === "failed"
-                  ? "Could not build the PDF. Try again, or use Preview."
-                  : phone
-                    ? `Opens ${customerName.split(" ")[0]}'s own chat directly — no searching for the contact — and downloads the PDF so you can attach it. The file works offline for ever, unlike a link. Nothing is sent until you press send.`
-                    : "Ask the customer for a mobile number on their next visit and it will appear here."}
+        {outcome === "blocked"
+          ? "Your browser blocked the new tab. The PDF has downloaded — use the button above to open the chat, then attach it."
+          : outcome === "shared"
+          ? "Handed to WhatsApp with the PDF attached and the message written. Pick the chat and press send."
+          : outcome === "cancelled"
+            ? "Cancelled — nothing was sent."
+            : outcome === "opened"
+              ? `${customerName.split(" ")[0]}'s chat is open with the message written, and the PDF has downloaded here — tap the paperclip to attach it, then send.`
+              : outcome === "opened-nofile"
+                ? `${customerName.split(" ")[0]}'s chat is open with the message. Use Download PDF if you want to attach the document too.`
+                : outcome === "downloaded"
+                  ? "The PDF is on this device, ready to attach."
+                  : outcome === "failed" || outcome === "no-number"
+                    ? "Could not build the PDF. Try again, or use Preview."
+                    : attaches
+                      ? "Sends the PDF as a real attachment together with the message — the customer keeps a document that opens offline for ever, not a link that dies. Pick WhatsApp and the contact, then press send. Nothing goes out on its own."
+                      : `Downloads the PDF and opens ${customerName.split(" ")[0]}'s own chat with the message ready — no searching for the contact. Attach the file with the paperclip. On a phone it attaches in one step; this browser cannot hand files to other apps.`}
       </p>
     </div>
   );

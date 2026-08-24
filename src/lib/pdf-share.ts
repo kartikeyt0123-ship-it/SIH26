@@ -24,7 +24,18 @@
 
 export type ShareOutcome = "shared" | "downloaded" | "cancelled" | "failed";
 
-async function fetchPdf(quotationId: string, filename: string): Promise<File | null> {
+/**
+ * One in-flight fetch per quotation, and the result kept.
+ *
+ * The share sheet has to open in the same gesture as the tap or the browser
+ * treats it as untrusted and refuses. Fetching a quarter-megabyte PDF first
+ * spends that budget on the network, so the document is pulled ahead of time by
+ * `prefetchQuotation` and this returns it instantly. Caching the promise rather
+ * than the file also collapses a double-tap into a single request.
+ */
+const pdfCache = new Map<string, Promise<File | null>>();
+
+async function loadPdf(quotationId: string, filename: string): Promise<File | null> {
   try {
     const res = await fetch(`/api/quotations/${quotationId}/pdf`, { cache: "no-store" });
     if (!res.ok) return null;
@@ -34,6 +45,44 @@ async function fetchPdf(quotationId: string, filename: string): Promise<File | n
     return new File([blob], filename, { type: "application/pdf" });
   } catch {
     return null;
+  }
+}
+
+function fetchPdf(quotationId: string, filename: string): Promise<File | null> {
+  const hit = pdfCache.get(quotationId);
+  if (hit) return hit;
+  const p = loadPdf(quotationId, filename).then((f) => {
+    // A failure is not cached — the next tap should try again rather than be
+    // told for ever that the document cannot be built.
+    if (!f) pdfCache.delete(quotationId);
+    return f;
+  });
+  pdfCache.set(quotationId, p);
+  return p;
+}
+
+/** Warm the cache so the first tap opens the share sheet with no wait. */
+export function prefetchQuotation(quotationId: string, customer: string) {
+  void fetchPdf(quotationId, safeName(customer));
+}
+
+/** True when this device can hand a file to another app. */
+export function canShareFiles(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const nav = navigator as Navigator & {
+    canShare?: (d: ShareData & { files?: File[] }) => boolean;
+    share?: unknown;
+  };
+  if (!nav.share || !nav.canShare) return false;
+  try {
+    // Probed with a real file: several browsers expose `share` but reject file
+    // payloads, and finding that out after the tap strands the dealer.
+    const probe = new File([new Blob(["x"], { type: "application/pdf" })], "p.pdf", {
+      type: "application/pdf",
+    });
+    return nav.canShare({ files: [probe] });
+  } catch {
+    return false;
   }
 }
 
@@ -131,20 +180,65 @@ export async function sendQuotationTo(
   customer: string,
   phone: string | null | undefined,
   message: string,
-): Promise<{ outcome: "opened" | "no-number" | "failed"; downloaded: boolean }> {
-  const link = whatsappTextLink(phone, message);
-  if (!link) return { outcome: "no-number", downloaded: false };
+): Promise<{
+  outcome: "shared" | "cancelled" | "opened" | "blocked" | "no-number" | "failed";
+  downloaded: boolean;
+}> {
+  // Phone first: the share sheet carries the PDF *and* the message in one
+  // action, so the customer receives an attachment rather than a link. That is
+  // the only route on the open web that actually attaches a file to WhatsApp,
+  // and it is worth the contact tap it costs.
+  if (canShareFiles()) {
+    const file = await fetchPdf(quotationId, safeName(customer));
+    if (file) {
+      const nav = navigator as Navigator & {
+        share: (d: ShareData & { files?: File[] }) => Promise<void>;
+      };
+      try {
+        await nav.share({ files: [file], text: message, title: "Rachna AI quotation" });
+        return { outcome: "shared", downloaded: false };
+      } catch (e) {
+        // Backing out of the sheet is a normal thing to do, not an error, and
+        // must not trigger a download the dealer did not ask for.
+        if ((e as Error)?.name === "AbortError") return { outcome: "cancelled", downloaded: false };
+      }
+    }
+  }
 
-  // Downloaded before the tab opens: a browser will block a popup that happens
-  // after an await on some platforms, and a dealer who lands in the chat with
-  // no file is worse off than one who waits half a second.
+  // Desktop and anything without file sharing: put the PDF on the machine and
+  // open the customer's own chat, so it is one paperclip away.
+  const link = whatsappTextLink(phone, message);
+  if (!link) {
+    const saved = await downloadQuotation(quotationId, customer);
+    return { outcome: saved ? "no-number" : "failed", downloaded: saved };
+  }
+
+  // OPENED BEFORE THE AWAIT, and that ordering is the whole point.
+  //
+  // A browser only honours window.open while it still considers the click to
+  // be driving the code. Downloading the PDF first spends that permission on a
+  // fetch, the popup is then refused, and the previous fallback — navigating
+  // this tab to the link — threw the dealer out of the console into WhatsApp
+  // and lost the page they were working on. Opening first keeps the console
+  // exactly where it was.
+  const win = window.open(link, "_blank", "noopener");
+
   const downloaded = await downloadQuotation(quotationId, customer);
 
-  const win = window.open(link, "_blank", "noopener");
-  if (!win) {
-    // Popup blocked — fall back to navigating this tab rather than silently
-    // doing nothing.
-    window.location.href = link;
-  }
+  // Still blocked by a popup blocker: say so, and let the UI offer a plain
+  // link. Never navigate this tab away from the dealer's own screen.
+  if (!win) return { outcome: "blocked", downloaded };
   return { outcome: "opened", downloaded };
+}
+
+/**
+ * The customer's chat with the message only. No file, no picker.
+ *
+ * Fully synchronous, so the click still counts as user activation and the tab
+ * is never refused.
+ */
+export function openChatWith(phone: string | null | undefined, message: string) {
+  const link = whatsappTextLink(phone, message);
+  if (!link) return false;
+  return Boolean(window.open(link, "_blank", "noopener"));
 }

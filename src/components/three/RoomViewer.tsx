@@ -1,8 +1,8 @@
 "use client";
 
-import { Suspense, useMemo } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls, SoftShadows } from "@react-three/drei";
 import type { RoomModel } from "@/lib/vision";
 import { timberTexture } from "./textures";
@@ -36,6 +36,49 @@ export type SchemeColors = {
   trim: string;
 };
 
+/**
+ * How much scene this device can afford.
+ *
+ * Decided once, from screen size and core count. A mid-range Android at three
+ * hundred rupees a month is the actual target here, and a scene that looks
+ * magnificent at eleven frames per second is worse than a plainer one that
+ * turns smoothly under a finger — this is a control the customer drags.
+ */
+function useQuality() {
+  const [q, setQ] = useState<"high" | "low">("high");
+  useEffect(() => {
+    const small = window.matchMedia("(max-width: 640px)").matches;
+    const cores = navigator.hardwareConcurrency ?? 8;
+    const mem = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8;
+    setQ(small && (cores <= 4 || mem <= 4) ? "low" : "high");
+  }, []);
+  return q;
+}
+
+/**
+ * Render only while the canvas is actually on screen.
+ *
+ * The viewer sits above a long list of schemes, so a customer scrolling to
+ * compare colours leaves it painting sixty frames a second to nobody —
+ * flattening the battery and stealing the main thread from the very list they
+ * are scrolling. Off screen the frameloop stops entirely; the scene resumes
+ * where it was when it comes back.
+ */
+function useOnScreen<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver(([e]) => setVisible(e.isIntersecting), {
+      rootMargin: "15% 0px",
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  return { ref, visible };
+}
+
 export function RoomViewer({
   room,
   colors,
@@ -44,20 +87,36 @@ export function RoomViewer({
 }: {
   room: RoomModel;
   colors: SchemeColors;
-  /** Drives which furniture appears. Falls back to a living room. */
+  /** Only used when the photograph shows nothing standing on the floor. */
   roomType?: string;
   className?: string;
 }) {
+  const quality = useQuality();
+  const { ref, visible } = useOnScreen<HTMLDivElement>();
+
+  // A photograph of one wall becomes one wall. Building a four-walled room
+  // around it would show the customer three surfaces and a floor that are not
+  // in their picture, and ask them to judge a colour against invented context.
+  if (room.scene === "wall") {
+    return (
+      <div ref={ref} className={className}>
+        <WallCanvas room={room} colors={colors} quality={quality} visible={visible} />
+      </div>
+    );
+  }
+
   return (
-    <div className={className}>
+    <div ref={ref} className={className}>
       <Canvas
         // Capped DPR and a modest shadow budget: this runs on a counter phone,
         // and a beautiful scene at twelve frames is worse than a good one at
         // sixty.
-        dpr={[1, 1.6]}
-        shadows
+        dpr={quality === "low" ? [1, 1.25] : [1, 1.6]}
+        frameloop={visible ? "always" : "never"}
+        shadows={quality === "low" ? false : { type: THREE.PCFSoftShadowMap }}
         gl={{
-          antialias: true,
+          antialias: quality === "high",
+          powerPreference: "high-performance",
           toneMapping: THREE.ACESFilmicToneMapping,
           toneMappingExposure: 1.05,
         }}
@@ -77,8 +136,11 @@ export function RoomViewer({
         }}
       >
         <Suspense fallback={null}>
-          <SoftShadows size={26} samples={8} focus={0.7} />
-          <RoomGeometry room={room} colors={colors} roomType={roomType} />
+          {/* Soft shadows patch every shader in the scene. Worth it on a laptop,
+              far too expensive on a low-end phone, where hard shadows are off
+              entirely anyway. */}
+          {quality === "high" && <SoftShadows size={26} samples={8} focus={0.7} />}
+          <RoomGeometry room={room} colors={colors} roomType={roomType} quality={quality} />
           <OrbitControls
             enablePan={false}
             minDistance={room.depthM * 0.32}
@@ -96,6 +158,191 @@ export function RoomViewer({
   );
 }
 
+/* ------------------------------ single wall -------------------------------- */
+
+/**
+ * One elevation, square on — what the customer actually photographed.
+ *
+ * There is a floor strip and skirting because a wall meets a floor and the join
+ * is where a colour is judged against something; there is no ceiling, no side
+ * walls and no invented furniture. Anything the analysis traced standing
+ * against the wall is placed in front of it, in its own colour from the
+ * photograph, so the surface is judged with the same things in front of it.
+ */
+function WallCanvas({
+  room,
+  colors,
+  quality,
+  visible,
+}: {
+  room: RoomModel;
+  colors: SchemeColors;
+  quality: "high" | "low";
+  visible: boolean;
+}) {
+  const W = Math.max(3, room.widthM);
+  const H = room.heightM;
+
+  return (
+    <Canvas
+      dpr={quality === "low" ? [1, 1.25] : [1, 1.6]}
+      frameloop={visible ? "always" : "never"}
+      shadows={quality === "low" ? false : { type: THREE.PCFSoftShadowMap }}
+      gl={{
+        antialias: quality === "high",
+        powerPreference: "high-performance",
+        toneMapping: THREE.ACESFilmicToneMapping,
+        toneMappingExposure: 1.05,
+      }}
+      camera={{ fov: 42, position: [0, 0.1, W * 0.95], near: 0.05, far: 60 }}
+    >
+      <Suspense fallback={null}>
+        {quality === "high" && <SoftShadows size={24} samples={8} focus={0.7} />}
+        <FitWall W={W} H={H} />
+        <WallScene room={room} colors={colors} W={W} H={H} />
+        <OrbitControls
+          enablePan={false}
+          minDistance={Math.max(W, H) * 0.5}
+          maxDistance={Math.max(W, H) * 2.2}
+          // A narrow arc: this is an elevation, and swinging round to look at
+          // the back of a single plane shows the customer nothing.
+          minAzimuthAngle={-0.5}
+          maxAzimuthAngle={0.5}
+          minPolarAngle={Math.PI * 0.36}
+          maxPolarAngle={Math.PI * 0.6}
+          target={[0, -0.15, 0]}
+          enableDamping
+          dampingFactor={0.08}
+        />
+      </Suspense>
+    </Canvas>
+  );
+}
+
+/**
+ * Stand the camera at the distance where the wall FILLS the frame.
+ *
+ * A fixed distance cannot do this: the viewport is a tall rectangle on a phone
+ * and a wide one on a laptop, and three.js `fov` is the VERTICAL angle.
+ *
+ * The rule is cover, not contain — the closer of the two constraints, not the
+ * further. Containing the whole wall inside a tall phone canvas parks it as a
+ * small letterboxed rectangle floating in empty background, because a 4.6 m
+ * wall shown whole on a narrow viewport has to be pushed a long way off. A wall
+ * is a continuous surface and seeing part of it is what standing in front of
+ * one looks like, so filling the frame and cropping the edges is both better
+ * looking and more truthful.
+ */
+function FitWall({ W, H }: { W: number; H: number }) {
+  const { camera, size } = useThree();
+
+  useEffect(() => {
+    const cam = camera as THREE.PerspectiveCamera;
+    const vFov = (cam.fov * Math.PI) / 180;
+    const aspect = size.width / Math.max(1, size.height);
+
+    // 1.04 keeps a sliver of margin so the skirting is not clipped away.
+    const forHeight = (H * 1.04) / 2 / Math.tan(vFov / 2);
+    const forWidth = (W * 1.04) / 2 / (Math.tan(vFov / 2) * aspect);
+
+    cam.position.set(0, -0.05, Math.min(forHeight, forWidth));
+    cam.updateProjectionMatrix();
+  }, [camera, size.width, size.height, W, H]);
+
+  return null;
+}
+
+function WallScene({
+  room,
+  colors,
+  W,
+  H,
+}: {
+  room: RoomModel;
+  colors: SchemeColors;
+  W: number;
+  H: number;
+}) {
+  const floorY = -H / 2;
+
+  const lightColor = useMemo(() => {
+    const warm = new THREE.Color("#ffdcb0");
+    const cool = new THREE.Color("#cfe0ff");
+    return cool.clone().lerp(warm, (room.lightWarmth + 1) / 2);
+  }, [room.lightWarmth]);
+
+  const floorTex = useMemo(() => {
+    const tex = timberTexture("#a9835a", "#6f5136").clone();
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(Math.max(2, W / 1.1), 2);
+    tex.needsUpdate = true;
+    return tex;
+  }, [W]);
+
+  const winW = Math.min(1.6, W * 0.3);
+  const winH = Math.min(1.4, H * 0.46);
+  const winX = (room.windowSide === "left" ? -1 : room.windowSide === "right" ? 1 : 0) * W * 0.26;
+
+  return (
+    <group>
+      {/* the wall itself — the whole subject */}
+      <mesh position={[0, 0, 0]} receiveShadow>
+        <planeGeometry args={[W, H]} />
+        <meshStandardMaterial color={colors.feature} roughness={0.96} metalness={0} />
+      </mesh>
+
+      {/* a short run of floor, so the wall has something to stand on */}
+      <mesh position={[0, floorY, 1.1]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[W, 2.2]} />
+        <meshStandardMaterial map={floorTex} roughness={0.62} />
+      </mesh>
+
+      <mesh position={[0, floorY + 0.055, 0.02]} castShadow receiveShadow>
+        <boxGeometry args={[W, 0.11, 0.025]} />
+        <meshStandardMaterial color={colors.trim} roughness={0.4} />
+      </mesh>
+
+      {room.windowStrength > 0.015 && (
+        <group position={[winX, floorY + H * 0.55, 0.02]}>
+          <mesh>
+            <planeGeometry args={[winW, winH]} />
+            <meshBasicMaterial color="#fdf6e8" toneMapped={false} />
+          </mesh>
+          <Frame w={winW} h={winH} thickness={0.07} depth={0.03} color={colors.trim} />
+          <mesh position={[0, 0, 0.016]} castShadow>
+            <boxGeometry args={[0.032, winH, 0.026]} />
+            <meshStandardMaterial color={colors.trim} roughness={0.35} />
+          </mesh>
+          <mesh position={[0, 0, 0.016]} castShadow>
+            <boxGeometry args={[winW, 0.032, 0.026]} />
+            <meshStandardMaterial color={colors.trim} roughness={0.35} />
+          </mesh>
+        </group>
+      )}
+
+      <TracedMasses masses={room.masses} W={W} H={H} floorY={floorY} z={0.06} />
+
+      <ambientLight intensity={0.5 + room.brightness * 0.25} color={lightColor} />
+      <hemisphereLight args={[lightColor, new THREE.Color("#6b5a48"), 0.4]} />
+      <directionalLight
+        castShadow
+        position={[winX || W * 0.3, H * 0.9, 2.6]}
+        intensity={1.3 + room.windowStrength * 2}
+        color={lightColor}
+        shadow-mapSize-width={1024}
+        shadow-mapSize-height={1024}
+        shadow-camera-near={0.1}
+        shadow-camera-far={W * 4}
+        shadow-camera-left={-W}
+        shadow-camera-right={W}
+        shadow-camera-top={H}
+        shadow-camera-bottom={-H}
+        shadow-bias={-0.0012}
+      />
+    </group>
+  );
+}
+
 /* --------------------------------- helpers -------------------------------- */
 
 /** Slightly darker relative of a colour, for skirting shadow lines and seams. */
@@ -105,14 +352,75 @@ function shade(hex: string, amount: number) {
   return `#${c.getHexString()}`;
 }
 
+/**
+ * The objects the analysis traced out of the photograph.
+ *
+ * Blocks, not sofas. The measurement knows a shape's position, width, height
+ * and colour — it does not know what the thing is, and modelling a cushioned
+ * three-seater from that would be a guess dressed up as a reading. A block in
+ * the object's real colour, in the right place at the right size, tells the
+ * customer what will be in front of that wall without pretending to more.
+ *
+ * Depth is inferred from proportion, which is the one honest guess available:
+ * something wide and low is likely seating and sticks out; something tall and
+ * narrow is likely a cupboard and is shallower.
+ */
+function TracedMasses({
+  masses,
+  W,
+  H,
+  floorY,
+  z,
+}: {
+  masses: RoomModel["masses"];
+  W: number;
+  H: number;
+  floorY: number;
+  /** Front face offset from the wall plane. */
+  z: number;
+}) {
+  if (!masses?.length) return null;
+
+  return (
+    <group>
+      {masses.map((m, i) => {
+        const w = Math.max(0.28, m.width * W);
+        const hgt = Math.max(0.22, m.height * H * 0.9);
+        const aspect = w / hgt;
+        // Wide and low reads as seating and projects; tall and narrow reads as
+        // storage and hugs the wall.
+        const depth = aspect > 1.6 ? Math.min(0.95, w * 0.42) : Math.min(0.55, w * 0.5);
+        const x = (m.centre - 0.5) * W;
+
+        return (
+          <group key={i} position={[x, floorY, z + depth / 2]}>
+            <mesh position={[0, hgt / 2, 0]} castShadow receiveShadow>
+              <boxGeometry args={[w, hgt, depth]} />
+              <meshStandardMaterial color={m.hex} roughness={0.92} />
+            </mesh>
+            {/* A lighter top face: a single flat box reads as a printed
+                rectangle, and one plane catching the light makes it an object. */}
+            <mesh position={[0, hgt + 0.004, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+              <planeGeometry args={[w * 0.98, depth * 0.98]} />
+              <meshStandardMaterial color={shade(m.hex, -0.08)} roughness={0.85} />
+            </mesh>
+          </group>
+        );
+      })}
+    </group>
+  );
+}
+
 function RoomGeometry({
   room,
   colors,
   roomType,
+  quality,
 }: {
   room: RoomModel;
   colors: SchemeColors;
   roomType?: string;
+  quality: "high" | "low";
 }) {
   const W = room.widthM;
   const H = room.heightM;
@@ -245,7 +553,30 @@ function RoomGeometry({
       </group>
 
       {/* ----------------------------- furniture ---------------------------- */}
-      {isBed ? (
+      {/* What was in the photograph wins. The room-type templates below are a
+          fallback for when the analysis found nothing standing anywhere — a
+          bare shell, or a shot too dark to trace — because an empty box is a
+          poor place to judge a colour. When the photograph DID show something,
+          that is what gets built, in its own colours, and no stock sofa is
+          added on top of it. */}
+      {room.masses.length > 0 ? (
+        <>
+          <Rug
+            w={Math.min(W * 0.8, 3.2)}
+            d={Math.min(D * 0.5, 2.2)}
+            z={-D * 0.05}
+            y={floorY}
+            color="#8d7f6d"
+          />
+          <TracedMasses
+            masses={room.masses}
+            W={W}
+            H={H}
+            floorY={floorY}
+            z={-D / 2 + 0.04}
+          />
+        </>
+      ) : isBed ? (
         <Bed W={W} D={D} y={floorY} accent={colors.feature} trim={colors.trim} />
       ) : isKitchen ? (
         <Counter W={W} D={D} y={floorY} trim={colors.trim} />
@@ -302,8 +633,8 @@ function RoomGeometry({
         ]}
         intensity={1.5 + room.windowStrength * 2.2}
         color={lightColor}
-        shadow-mapSize-width={1024}
-        shadow-mapSize-height={1024}
+        shadow-mapSize-width={quality === "low" ? 512 : 1024}
+        shadow-mapSize-height={quality === "low" ? 512 : 1024}
         shadow-camera-near={0.1}
         shadow-camera-far={Math.max(W, D) * 3}
         shadow-camera-left={-W}

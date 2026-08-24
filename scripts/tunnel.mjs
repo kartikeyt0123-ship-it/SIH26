@@ -58,11 +58,28 @@ function start() {
   attempt++;
   log(`starting tunnel → ${TARGET} (attempt ${attempt})`);
 
-  // http2 rather than the default QUIC: this machine's network drops sustained
-  // UDP, which showed up as repeated "failed to run the datagram handler".
-  const child = spawn(BIN, ["tunnel", "--url", TARGET, "--protocol", "http2", "--no-autoupdate"], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = spawn(
+    BIN,
+    [
+      "tunnel",
+      "--url",
+      TARGET,
+      // http2 rather than the default QUIC: this network drops sustained UDP,
+      // which showed up as repeated "failed to run the datagram handler".
+      "--protocol",
+      "http2",
+      // IPv4 only. cloudflared prefers IPv6 for the edge connection, and on
+      // this network those addresses time out — "dial tcp [2606:4700:...]:7844:
+      // i/o timeout" — so the tunnel registers a hostname, reports READY, and
+      // then serves 530 on every request because it never actually connected.
+      // A tunnel that looks up but answers nothing is the worst failure mode
+      // available, so the address family is pinned rather than negotiated.
+      "--edge-ip-version",
+      "4",
+      "--no-autoupdate",
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
 
   let url = null;
   let restarting = false;
