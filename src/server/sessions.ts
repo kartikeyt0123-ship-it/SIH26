@@ -273,11 +273,12 @@ export async function listSessions(dealerId: string): Promise<SessionDTO[]> {
   // Four more tables, still one query each for the whole dealer. The cost of
   // this function stays constant in the number of sessions, which is the
   // property the five-second dashboard poll depends on.
-  const [reqs, vizzes, images, designs, quotes, surfaces, profiles, variations, climates] =
+  // No visualizations query: the list no longer returns room models, so
+  // fetching them was a round trip per poll for data that was discarded.
+  const [reqs, images, designs, quotes, surfaces, profiles, variations, climates] =
     projectIds.length
       ? await Promise.all([
           db.query.requirements.findMany({ where: inArray(t.requirements.projectId, projectIds) }),
-          db.query.visualizations.findMany({ where: inArray(t.visualizations.projectId, projectIds) }),
           db.query.projectImages.findMany({
             where: inArray(t.projectImages.projectId, projectIds),
             orderBy: t.projectImages.position,
@@ -298,7 +299,7 @@ export async function listSessions(dealerId: string): Promise<SessionDTO[]> {
             where: inArray(t.climateContexts.projectId, projectIds),
           }),
         ])
-      : [[], [], [], [], [], [], [], [], []];
+      : [[], [], [], [], [], [], [], []];
 
   const group = <T extends { projectId: string }>(list: T[]) => {
     const m = new Map<string, T[]>();
@@ -311,7 +312,6 @@ export async function listSessions(dealerId: string): Promise<SessionDTO[]> {
   };
 
   const byProjectReq = group(reqs);
-  const byProjectViz = group(vizzes);
   const byProjectImg = group(images);
   const byProjectDesign = group(designs);
   const byProjectQuote = group(quotes);
@@ -337,7 +337,6 @@ export async function listSessions(dealerId: string): Promise<SessionDTO[]> {
     const expired = now > row.expiresAt && row.status !== "SUBMITTED";
     const project = projectBySession.get(row.id);
     const req = project ? byProjectReq.get(project.id)?.[0] : undefined;
-    const viz = project ? byProjectViz.get(project.id)?.slice(-1)[0] : undefined;
     const quote = project ? byProjectQuote.get(project.id)?.slice(-1)[0] : undefined;
     const spec = (req?.parsedSpec ?? null) as Record<string, unknown> | null;
     // Most recent analysis wins; the list is already ordered by insertion.
@@ -365,9 +364,16 @@ export async function listSessions(dealerId: string): Promise<SessionDTO[]> {
             step: project.step,
             spec,
             measurements: (req?.measurements ?? null) as Record<string, unknown> | null,
-            room: (viz?.roomModel ?? null) as Record<string, unknown> | null,
-            roomEngine: viz?.engine ?? null,
-            roomConfidence: viz?.confidence ?? null,
+            // The 3D room model is deliberately NOT sent in the list.
+            //
+            // No dealer screen reads it — it exists for the customer's own
+            // viewer, which loads a single project through `hydrateProject`.
+            // Across thirty-odd sessions the palettes and traced masses came to
+            // about 7 KB of every poll, five seconds apart, for data nothing
+            // rendered. The single-project path below still returns it in full.
+            room: null,
+            roomEngine: null,
+            roomConfidence: null,
             images: (byProjectImg.get(project.id) ?? []).map((i) => ({
               id: i.id,
               url: `/api/images/${i.id}`,
@@ -383,8 +389,15 @@ export async function listSessions(dealerId: string): Promise<SessionDTO[]> {
             quotation: quote
               ? {
                   id: quote.id,
-                  lines: quote.lines,
-                  areas: quote.areas,
+                  // Line items and areas are omitted from the LIST on purpose.
+                  // The dealer screen recomputes them with `buildQuote` from
+                  // the spec, scheme and measurements it already has, so
+                  // shipping the stored copy sent ~5 KB per poll that was
+                  // parsed and thrown away. The PDF route reads the stored
+                  // lines straight from the database, so the record a customer
+                  // was sent is still the record that gets rendered.
+                  lines: [],
+                  areas: {},
                   subtotal: quote.subtotal,
                   discountPct: quote.discountPct,
                   total: quote.total,

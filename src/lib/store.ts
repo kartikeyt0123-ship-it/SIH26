@@ -58,45 +58,120 @@ export const revokeSession = (token: string) =>
  * If Supabase Realtime is configured later, this hook is the only thing that
  * changes.
  */
-export function useDealerSessions(pollMs = 5000) {
-  const [sessions, setSessions] = useState<SessionDTO[]>([]);
-  const [origin, setOrigin] = useState("");
-  const [publicReachable, setPublicReachable] = useState(true);
-  const [ready, setReady] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+type SessionsSnapshot = {
+  sessions: SessionDTO[];
+  origin: string;
+  publicReachable: boolean;
+  ready: boolean;
+  error: string | null;
+};
 
-  const load = useCallback(async () => {
-    try {
-      const r = await call<{
-        sessions: SessionDTO[];
-        origin: string;
-        publicReachable: boolean;
-      }>("/api/sessions");
-      setSessions(r.sessions);
-      setOrigin(r.origin);
-      setPublicReachable(r.publicReachable);
-      setError(null);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setReady(true);
-    }
-  }, []);
+/**
+ * ONE poll for the whole page, however many components want the data.
+ *
+ * This used to be per-component state, and the Overview mounts three consumers
+ * at once — the incoming queue, the awaiting-quotation count and the customer
+ * split. Each ran its own five-second interval against `/api/sessions`, which
+ * returns about 59 KB and costs roughly a second. So the page pulled ~176 KB
+ * every five seconds and did three times the database work to render one
+ * screen, which on a counter phone is most of the reason it felt heavy.
+ *
+ * The store below is module-level: the first subscriber starts the interval,
+ * the last one stops it, and everybody reads the same snapshot. Consumers also
+ * get the CACHED value on mount, so moving between dashboard pages paints
+ * immediately from what is already known and refreshes underneath instead of
+ * showing "Loading…" again.
+ */
+const sessionStore: SessionsSnapshot = {
+  sessions: [],
+  origin: "",
+  publicReachable: true,
+  ready: false,
+  error: null,
+};
+
+const sessionSubscribers = new Set<(s: SessionsSnapshot) => void>();
+let sessionTimer: ReturnType<typeof setInterval> | null = null;
+let sessionInFlight: Promise<void> | null = null;
+
+function emitSessions() {
+  // A fresh object per emit, so React sees a changed reference and re-renders.
+  const snapshot = { ...sessionStore };
+  for (const fn of sessionSubscribers) fn(snapshot);
+}
+
+function loadSessions(): Promise<void> {
+  // Collapse concurrent calls. Three components mounting together would
+  // otherwise fire three identical requests before any of them resolved.
+  if (sessionInFlight) return sessionInFlight;
+
+  sessionInFlight = call<{
+    sessions: SessionDTO[];
+    origin: string;
+    publicReachable: boolean;
+  }>("/api/sessions")
+    .then((r) => {
+      sessionStore.sessions = r.sessions;
+      sessionStore.origin = r.origin;
+      sessionStore.publicReachable = r.publicReachable;
+      sessionStore.error = null;
+    })
+    .catch((e: Error) => {
+      sessionStore.error = e.message;
+    })
+    .finally(() => {
+      sessionStore.ready = true;
+      sessionInFlight = null;
+      emitSessions();
+    });
+
+  return sessionInFlight;
+}
+
+export function useDealerSessions(pollMs = 5000) {
+  const [snapshot, setSnapshot] = useState<SessionsSnapshot>(() => ({ ...sessionStore }));
 
   useEffect(() => {
-    load();
-    const id = setInterval(load, pollMs);
-    // Poll only while the tab is visible; a backgrounded dashboard hitting the
-    // database every five seconds all afternoon is pure waste.
-    const onVis = () => document.visibilityState === "visible" && load();
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      clearInterval(id);
-      document.removeEventListener("visibilitychange", onVis);
-    };
-  }, [load, pollMs]);
+    sessionSubscribers.add(setSnapshot);
 
-  return { sessions, origin, publicReachable, ready, error, refresh: load };
+    // Always refresh on mount so a returning page is never stale, but the
+    // cached snapshot is already on screen while it happens.
+    loadSessions();
+
+    if (!sessionTimer) {
+      sessionTimer = setInterval(() => {
+        // Genuinely skip while hidden. The previous version claimed to do this
+        // but kept the interval running, so a dashboard left open in a
+        // background tab polled the database all afternoon for nobody.
+        if (typeof document !== "undefined" && document.hidden) return;
+        loadSessions();
+      }, pollMs);
+    }
+
+    const onVis = () => {
+      if (document.visibilityState === "visible") loadSessions();
+    };
+    document.addEventListener("visibilitychange", onVis);
+
+    return () => {
+      sessionSubscribers.delete(setSnapshot);
+      document.removeEventListener("visibilitychange", onVis);
+      // Last one out turns the polling off.
+      if (sessionSubscribers.size === 0 && sessionTimer) {
+        clearInterval(sessionTimer);
+        sessionTimer = null;
+      }
+    };
+  }, [pollMs]);
+
+  return {
+    sessions: snapshot.sessions,
+    origin: snapshot.origin,
+    publicReachable: snapshot.publicReachable,
+    ready: snapshot.ready,
+    error: snapshot.error,
+    refresh: loadSessions,
+  };
 }
 
 export const createQuotation = (input: {

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useDealerAccount } from "@/lib/account-client";
+import { clearDealerAccountCache, useDealerAccount } from "@/lib/account-client";
 import {
   Boxes,
   CloudSun,
@@ -55,6 +55,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
   const signOut = async () => {
     await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+    // Drop the cached identity before leaving. The full navigation below tears
+    // the module down anyway, but relying on that would make the cache unsafe
+    // the day anyone signs out without a reload.
+    clearDealerAccountCache();
     window.location.href = "/login";
   };
 
